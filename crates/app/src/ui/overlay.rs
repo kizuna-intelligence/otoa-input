@@ -255,12 +255,15 @@ fn splash_status(login_state: &LoginState) -> &'static str {
 fn display_text(text: &str) -> String {
     const LINE_LIMIT: usize = 40;
     const MAX_CHARS: usize = LINE_LIMIT * 2;
-    let mut chars = text.chars().take(MAX_CHARS).collect::<Vec<_>>();
-    if text.chars().count() > MAX_CHARS {
-        if let Some(last) = chars.last_mut() {
-            *last = '…';
-        }
-    }
+    let text_chars = text.chars().collect::<Vec<_>>();
+    let mut chars = if text_chars.len() > MAX_CHARS {
+        let mut tail = Vec::with_capacity(MAX_CHARS);
+        tail.push('…');
+        tail.extend_from_slice(&text_chars[text_chars.len() - (MAX_CHARS - 1)..]);
+        tail
+    } else {
+        text_chars
+    };
     if chars.len() > LINE_LIMIT && !chars[..LINE_LIMIT].contains(&'\n') {
         chars.insert(LINE_LIMIT, '\n');
     }
@@ -294,5 +297,47 @@ fn overlay_summary(mode: OverlayMode) -> &'static str {
             OverlayKind::Error => "error",
             OverlayKind::LoginNeeded => "login-needed",
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_text;
+
+    #[test]
+    fn display_text_keeps_exactly_eighty_characters() {
+        let text = "a".repeat(80);
+        assert_eq!(
+            display_text(&text),
+            format!("{}\n{}", "a".repeat(40), "a".repeat(40))
+        );
+    }
+
+    #[test]
+    fn display_text_keeps_the_tail_after_eighty_characters() {
+        let text = format!("discard{}", "z".repeat(79));
+        let displayed = display_text(&text);
+
+        assert_eq!(
+            displayed,
+            format!("…{}\n{}", "z".repeat(39), "z".repeat(40))
+        );
+        assert!(!displayed.contains("discard"));
+    }
+
+    #[test]
+    fn display_text_truncates_japanese_at_character_boundaries() {
+        let text = format!("捨てる{}末尾", "語".repeat(80));
+        let displayed = display_text(&text);
+
+        assert!(displayed.starts_with('…'));
+        assert!(displayed.ends_with("末尾"));
+        assert_eq!(
+            displayed
+                .chars()
+                .filter(|character| *character != '\n')
+                .count(),
+            80
+        );
     }
 }

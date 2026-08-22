@@ -159,12 +159,12 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
     // 自分で立てる。**利用者に 2 つ起動させないため。**
     // 接続確認より前に行う。ここを後にすると --check-connection が必ず失敗する。
     if let Ok(endpoint) = deps.provider.endpoint(&settings.core) {
-        match bundled_server::start_if_needed(&endpoint.url) {
+        match bundled_server::start_if_needed(&endpoint.url, &settings.asr_engine) {
             Ok(Some(model_dir)) => {
                 tracing::info!(model_dir = %model_dir.display(), "同梱の ASR サーバーを起動した")
             }
             Ok(None) => {}
-            // 起動できなくても続ける。設定を直せば別の接続先を使える。
+            // 起動できなくても続ける。設定画面でエンジンや接続先を直せるようにする。
             Err(message) => tracing::warn!(%message, "同梱の ASR サーバーを起動できない"),
         }
     }

@@ -13,3 +13,6 @@
 # 音声の書き出し（--dump-dir）
 /dumps/
 THIRD-PARTY-LICENSES.md
+
+# ローカル検証用の Python 環境
+/.venv/

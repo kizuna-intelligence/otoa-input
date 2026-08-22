@@ -21,6 +21,11 @@ pub struct Settings {
     /// 置かないのは、何が既定かは接続先の実装だけが知っているからである。
     #[serde(alias = "gateway_url")] // 後方互換: 旧キー名
     pub server_url: String,
+    /// 同梱サーバーで使う認識エンジン。`reazonspeech`（既定）と `kodama`。
+    ///
+    /// 別の機械のサーバーや、エンジンを自分で決める接続先に繋ぐ構成では
+    /// 意味を持たない。同梱サーバーを自分で起動するときだけ効く。
+    pub asr_engine: String,
     /// 言語ヒント。空なら自動検出。
     pub language_hints: Vec<String>,
     /// 起動時に待受を始めるか。
@@ -63,6 +68,7 @@ impl fmt::Debug for Settings {
             .debug_struct("Settings")
             .field("endpoint_mode", &self.endpoint_mode)
             .field("server_url", &self.server_url)
+            .field("asr_engine", &self.asr_engine)
             .field("language_hints", &self.language_hints)
             .field("listening_enabled", &self.listening_enabled)
             .field("vad_model_path", &self.vad_model_path)
@@ -89,6 +95,7 @@ impl Default for Settings {
         Self {
             endpoint_mode: "client".to_string(),
             server_url: String::new(),
+            asr_engine: "reazonspeech".to_string(),
             language_hints: vec!["ja".to_string()],
             listening_enabled: true,
             vad_model_path: String::new(),
@@ -131,6 +138,7 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.language_hints, vec!["ja"]);
         assert!(settings.listening_enabled);
+        assert_eq!(settings.asr_engine, "reazonspeech");
         assert_eq!(settings.vad_threshold, 0.5);
         assert_eq!(settings.input_gain, 1.0);
         assert_eq!(settings.vad_min_speech_ms, 200);
@@ -160,6 +168,7 @@ mod tests {
         let settings: Settings =
             serde_json::from_str(r#"{}"#).expect("settings should deserialize");
         assert!(settings.server_url.is_empty());
+        assert_eq!(settings.asr_engine, "reazonspeech");
         assert_eq!(settings.language_hints, Settings::default().language_hints);
         assert_eq!(settings.vad_threshold, Settings::default().vad_threshold);
         assert_eq!(settings.input_gain, Settings::default().input_gain);

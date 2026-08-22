@@ -1,15 +1,12 @@
 [package]
-name = "otoa-input-vad"
+name = "otoa-input-onnx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-tracing.workspace = true
 ort.workspace = true
-ndarray.workspace = true
-otoa-input-onnx = { path = "../onnx" }
 
 [dev-dependencies]
 sherpa-onnx.workspace = true

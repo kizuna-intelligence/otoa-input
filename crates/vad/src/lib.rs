@@ -39,6 +39,7 @@ impl SileroVad {
     }
 
     fn from_model_bytes(bytes: &[u8], origin: &str) -> Result<Self> {
+        otoa_input_onnx::ensure_initialized()?;
         let session = Session::builder()
             .context("failed to create ONNX Runtime session builder")?
             .commit_from_memory(bytes)
@@ -156,6 +157,7 @@ mod tests {
 
     #[test]
     fn hop_and_context_constants() {
+        let _link_sherpa = std::mem::size_of::<sherpa_onnx::OfflineRecognizerConfig>();
         assert_eq!(VAD_SAMPLE_RATE, 16_000);
         assert_eq!(VAD_HOP, 512);
         assert_eq!(VAD_CONTEXT, 64);

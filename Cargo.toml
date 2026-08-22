@@ -5,6 +5,8 @@ members = [
     "crates/core",
     "crates/platform",
     "crates/protocol",
+    "crates/onnx",
+    "crates/kodama",
     "crates/vad",
     "crates/asr-server",
 ]
@@ -28,3 +30,5 @@ sherpa-onnx = { version = "1.13.5", default-features = false, features = ["stati
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 url = "2"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "alternative-backend"] }
+ndarray = "0.16"
