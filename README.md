@@ -239,6 +239,39 @@ cargo run --release -p otoa-input-app -- --help
 書き出します。「先頭が欠ける」ような不具合で、欠けているのが音声なのか
 認識結果なのかを切り分けるためのものです。
 
+## 謝辞
+
+このツールが使っている認識モデルは、いずれも他の方の成果です。
+
+### kodama-ja-streaming-small — [ようさん（ayousanz）](https://huggingface.co/ayousanz)
+
+[`ayousanz/kodama-ja-streaming-small`](https://huggingface.co/ayousanz/kodama-ja-streaming-small)（Apache-2.0）
+
+日本語ストリーミング音声認識モデルと、その ONNX 資産。
+ベースは Useful Sensors, Inc. (dba Moonshine AI) の
+[`moonshine-ai/moonshine-streaming-small`](https://huggingface.co/moonshine-ai/moonshine-streaming-small)（MIT）。
+
+### ReazonSpeech k2-v2 — [Reazon Human Interaction Lab](https://huggingface.co/reazon-research)
+
+[`reazon-research/reazonspeech-k2-v2`](https://huggingface.co/reazon-research/reazonspeech-k2-v2)（Apache-2.0）
+
+日本語音声認識モデル。同ラボの
+[ReazonSpeech コーパス](https://huggingface.co/datasets/reazon-research/reazonspeech)（CDLA-Sharing-1.0）で
+学習されています。
+
+### そのほか
+
+- **Silero VAD** — Silero Team
+  ([snakers4/silero-vad](https://github.com/snakers4/silero-vad))。MIT。
+  発話の始まりと終わりの判定に使っています（同梱）
+- **sherpa-onnx** — k2-fsa
+  ([k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx))。Apache-2.0
+- **ONNX Runtime** — Microsoft。MIT
+
+**認識の質はモデルの質です。** このツールが担っているのは、音声を集めて
+渡し、返ってきた文字を貼り付けるところまでで、認識そのものは上のモデルの
+成果です。
+
 ## ライセンス
 
 MIT。詳細は `LICENSE`、同梱物と別途取得するモデルの表示は `NOTICE` を

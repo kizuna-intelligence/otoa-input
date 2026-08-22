@@ -27,11 +27,13 @@ NOT distributed with this repository. See README for how to obtain them.
 Their licenses apply to your copy.
 
 ReazonSpeech k2-v2
+  Reazon Human Interaction Lab (https://huggingface.co/reazon-research)
   Apache License, Version 2.0
   https://huggingface.co/reazon-research/reazonspeech-k2-v2
 
 kodama-ja-streaming-small
-  Copyright (c) 2026 yousan (https://huggingface.co/ayousanz)
+  Copyright (c) 2026 ayousanz (https://huggingface.co/ayousanz)
+  Fine-tuned on ReazonSpeech v2 by Reazon Human Interaction Lab.
   Apache License, Version 2.0
   https://huggingface.co/ayousanz/kodama-ja-streaming-small
   Upstream NOTICE (must be retained when redistributing the model):
