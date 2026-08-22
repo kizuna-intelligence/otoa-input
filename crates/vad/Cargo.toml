@@ -1,0 +1,11 @@
+[package]
+name = "otoa-input-vad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+ort = "=2.0.0-rc.12"
+ndarray = "0.16"

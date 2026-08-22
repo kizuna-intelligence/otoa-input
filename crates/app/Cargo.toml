@@ -1,0 +1,35 @@
+[package]
+name = "otoa-input-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "otoa_input_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "otoa-input"
+path = "src/main.rs"
+
+[dependencies]
+otoa-asr-server = { path = "../asr-server" }
+otoa-input-core = { path = "../core" }
+otoa-input-platform = { path = "../platform" }
+otoa-input-protocol = { path = "../protocol" }
+otoa-input-vad = { path = "../vad" }
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+floem = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.21", default-features = false }
+gtk = "0.18"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.21", default-features = false }

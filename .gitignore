@@ -1,0 +1,14 @@
+/target
+**/target
+
+# 認識モデル。README の手順で取得する
+/models/
+
+# 配布アーカイブ。scripts/build-release.sh が作る
+/dist/
+
+# 取得してくる第三者ツール（appimagetool など）
+/tools/
+
+# 音声の書き出し（--dump-dir）
+/dumps/

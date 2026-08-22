@@ -1,0 +1,16 @@
+[package]
+name = "otoa-input-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+url = "2"

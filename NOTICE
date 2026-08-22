@@ -1,0 +1,38 @@
+Otoa Input
+Copyright (c) 2026 Kizuna Intelligence
+
+Licensed under the MIT License. See LICENSE.
+
+MIT does not require this file. It is kept because the bundled and
+externally fetched components carry their own copyright notices, and MIT
+requires those notices to be preserved in redistributions.
+
+Contributions are accepted under the terms in CONTRIBUTING.md, which include
+a patent license from the contributor. See that file.
+
+--------------------------------------------------------------------------
+Bundled
+--------------------------------------------------------------------------
+
+Silero VAD (resources/models/silero_vad.onnx)
+  Copyright (c) 2024 Silero Team
+  MIT License
+  https://github.com/snakers4/silero-vad
+
+--------------------------------------------------------------------------
+Fetched separately at setup time
+--------------------------------------------------------------------------
+
+NOT distributed with this repository. See README for how to obtain them.
+Their licenses apply to your copy.
+
+ReazonSpeech k2-v2
+  Apache License, Version 2.0
+  https://huggingface.co/reazon-research/reazonspeech-k2-v2
+
+--------------------------------------------------------------------------
+Rust crates
+--------------------------------------------------------------------------
+
+This software depends on third-party crates listed in Cargo.toml and
+Cargo.lock, each under its own license.

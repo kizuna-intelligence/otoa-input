@@ -1,0 +1,26 @@
+[package]
+name = "otoa-asr-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "otoa_asr_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "otoa-asr-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+otoa-input-platform = { path = "../platform" }
+otoa-input-protocol = { path = "../protocol" }
+serde_json.workspace = true
+sherpa-onnx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

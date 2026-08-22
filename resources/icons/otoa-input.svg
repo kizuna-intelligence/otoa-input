@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Otoa Input icon">
+  <rect width="1024" height="1024" rx="224" fill="#2f7fe0"/>
+  <circle cx="284" cy="228" r="208" fill="#46b6e6" opacity="0.32"/>
+  <circle cx="762" cy="820" r="260" fill="#1c5cbb" opacity="0.28"/>
+  <circle cx="512" cy="512" r="292" fill="none" stroke="#ffffff" stroke-width="92"/>
+  <g fill="none" stroke="#ffffff" stroke-width="54" stroke-linecap="round">
+    <path d="M420 530v-86"/>
+    <path d="M512 560V372"/>
+    <path d="M604 530v-86"/>
+  </g>
+  <circle cx="716" cy="716" r="76" fill="#ffb84d" stroke="#ffffff" stroke-width="30"/>
+</svg>
