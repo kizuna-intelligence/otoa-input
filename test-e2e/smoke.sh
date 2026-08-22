@@ -49,6 +49,21 @@ sleep 2
 DISPLAY=:99 "$APP" --paste-test "SMOKE_TEST" 2>&1 | grep -q "^OK:" \
     && ok "貼り付け" || ng "貼り付け"
 
+echo "== 5. 画面が出る（GUI が起動して落ちない）=="
+# **--help だけ通っても意味がない。** GUI は別のライブラリを要求するので、
+# 実際に起動して落ちないことを確かめる。実際にこれで
+# libxkbcommon-x11 / libayatana-appindicator3 の不足を見逃していた。
+rm -rf /home/tester/.config
+( DISPLAY=:99 "$APP" > /home/tester/gui.log 2>&1 & )
+sleep 12
+if pgrep -f otoa-input > /dev/null; then
+    ok "GUI 起動"
+    pkill -f otoa-input
+else
+    ng "GUI 起動"
+    grep -iE "cannot open|could not be loaded|panicked" /home/tester/gui.log | head -3 | sed 's/^/       /'
+fi
+
 echo
 [ $FAIL -eq 0 ] && echo "すべて通過" || echo "失敗あり"
 exit $FAIL

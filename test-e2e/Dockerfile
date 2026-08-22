@@ -15,7 +15,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       libasound2t64 libgtk-3-0t64 libxcb1 \
-      xdotool xvfb \
+      libxkbcommon-x11-0 libayatana-appindicator3-1 libegl1 libgl1 \
+      xdotool xvfb procps \
       fuse3 libfuse2t64 \
     && rm -rf /var/lib/apt/lists/*
 

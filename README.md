@@ -18,66 +18,123 @@
 - サーバー — [ReazonSpeech k2-v2](https://huggingface.co/reazon-research/reazonspeech-k2-v2) による日本語音声認識
 - 両者は WebSocket の **Otoa ASR Protocol v1** で話す（[`docs/otoa_asr_protocol.md`](docs/otoa_asr_protocol.md)）
 
-## 動かす
+## 使ってみる
 
-> **macOS の人へ**: リリースページの `.dmg` を使ってください。署名と Apple の
-> 公証を通してあるので、ダブルクリックで開けます。`.tar.gz` の中身は署名が
-> 無いため Gatekeeper に弾かれます。
+ビルドは要りません。**2 つ落として、起動するだけです。**
 
-### 1. 必要なもの
+### 1. 本体を落とす
 
-- Rust（stable）
-- 認識モデル（下記）
-- ビルド時にネットワーク。`sherpa-onnx` が ONNX Runtime を取得する
+[リリースページ](https://github.com/kizuna-intelligence/otoa-input/releases/latest)から
+自分の OS のものを取ります。
 
-Linux では次も要る。
+| OS | ファイル |
+|---|---|
+| Linux | `otoa-input-<版>-linux-x86_64.AppImage` |
+| macOS (Apple Silicon) | `otoa-input-<版>-macos-arm64.dmg` |
+| Windows | `otoa-input-<版>-windows-x86_64.zip` |
 
-```bash
-sudo apt install libgtk-3-dev libasound2-dev libxcb1-dev
-# 貼り付けに使う。X11 なら xdotool、Wayland なら wtype
-sudo apt install xdotool          # X11
-sudo apt install wtype            # Wayland
-```
+- **Linux**: 実行できるようにします。`chmod +x otoa-input-*.AppImage`
+- **macOS**: `.dmg` を開いて `Otoa Input.app` を「アプリケーション」へドラッグ。
+  署名と Apple の公証を通してあるので、そのまま開けます
+- **Windows**: `.zip` を展開して `otoa-input.exe`
 
-`xdotool`（Wayland では `wtype`）は**実行時**に要る。入っていないと、
-認識はできるのに貼り付けだけが失敗する。
+### 2. 認識モデルを落とす
 
-### 2. 認識モデルを取る
-
-ReazonSpeech k2-v2 の ONNX 一式を落とします。リポジトリには同梱していません。
+音声認識のモデルは大きい（数百 MB）ので同梱していません。別に取ります。
 
 ```bash
 pip install -U "huggingface_hub[cli]"
-hf download reazon-research/reazonspeech-k2-v2 --local-dir models/reazonspeech-k2-v2
+hf download reazon-research/reazonspeech-k2-v2 --local-dir reazonspeech-k2-v2
 ```
 
-次の 4 つがあれば動きます。
+**取れたフォルダを、次のどちらかに `reazonspeech-k2-v2` という名前で置きます。**
+
+| | 置き場所 |
+|---|---|
+| 本体の隣（持ち歩くならこちら） | `<本体と同じ場所>/models/reazonspeech-k2-v2` |
+| ユーザーごとの場所 | Linux: `~/.local/share/otoa-input-oss/models/reazonspeech-k2-v2`<br>macOS: `~/Library/Application Support/otoa-input-oss/models/reazonspeech-k2-v2`<br>Windows: `%APPDATA%\otoa-input-oss\models\reazonspeech-k2-v2` |
+
+例（Linux で本体の隣に置く場合）:
 
 ```
-encoder-epoch-99-avg-1.onnx
-decoder-epoch-99-avg-1.onnx
-joiner-epoch-99-avg-1.onnx
-tokens.txt
+otoa-input-0.1.3-linux-x86_64.AppImage
+models/
+  reazonspeech-k2-v2/
+    encoder-epoch-99-avg-1.onnx
+    decoder-epoch-99-avg-1.onnx
+    joiner-epoch-99-avg-1.onnx
+    tokens.txt
 ```
 
 ### 3. 起動する
+
+ダブルクリックするだけです。**認識サーバーは自分で立ち上がるので、別に何かを
+起動する必要はありません。** 初回はモデルの読み込みに数秒かかります。
+
+話し終えて少し黙ると、認識結果がカーソル位置へ貼り付きます。
+
+### Linux だけ、追加で要るもの
+
+デスクトップ環境が入っていれば大半は既に入っています。**最小構成の Ubuntu で
+確認した、これだけあれば起動するという一覧です。**
+
+```bash
+sudo apt install \
+  libasound2t64 libgtk-3-0t64 libxcb1 \
+  libxkbcommon-x11-0 libayatana-appindicator3-1 libegl1 libgl1 \
+  xdotool
+```
+
+- `xdotool` は**貼り付けに使います**（Wayland では `wtype`）。入っていないと、
+  認識はできるのに貼り付けだけが失敗します
+- `libxkbcommon-x11-0` と `libayatana-appindicator3-1` が無いと、**画面が
+  出る前に落ちます**
+- AppImage を FUSE 無しで動かす場合は `./otoa-input-*.AppImage --appimage-extract`
+  で展開し、`squashfs-root/AppRun` を実行してください
+
+## うまくいかないとき
+
+```bash
+./otoa-input --check-connection   # 認識サーバーへ繋がるか
+./otoa-input --paste-test         # 貼り付けだけを試す
+./otoa-input --help               # オプション一覧
+```
+
+- **「認識モデルが見つかりません」** → 上の置き場所を確認してください。
+  フォルダ名は `reazonspeech-k2-v2`、中に `tokens.txt` がある状態です
+- **認識はできるのに貼り付かない（Linux）** → `xdotool` / `wtype` を入れます
+- **貼り付かない（macOS）** → システム設定 → プライバシーとセキュリティ →
+  アクセシビリティ で `Otoa Input` を許可します
+
+## ソースからビルドする
+
+利用するだけなら不要です。
+
+必要なもの: Rust（stable）と、ビルド時のネットワーク（`sherpa-onnx` が
+ONNX Runtime を取得します）。Linux では次も要ります。
+
+```bash
+sudo apt install libgtk-3-dev libasound2-dev libxcb1-dev
+```
 
 ```bash
 cargo run --release -p otoa-input-app
 ```
 
-**これだけです。** 接続先が自分の機械で、まだ誰も待ち受けていなければ、
-ASR サーバーは自分で立ち上がります。別のプロセスを起動する必要はありません。
+配布物を作る場合:
 
-リリースの配布物なら、`.AppImage` / `.app` / `.exe` をそのまま起動するだけです。
+```bash
+bash scripts/build-release.sh    # 共通
+bash scripts/package-linux.sh    # Linux: AppImage
+bash scripts/package-macos.sh    # macOS: 署名・公証済み DMG（鍵は環境変数で渡す）
+```
 
-別の機械でサーバーだけ動かしたい場合は次のどちらかを使います。
+別の機械でサーバーだけ動かす場合:
 
 ```bash
 otoa-input --serve --asr-model-dir=<dir>   # 同じ実行ファイルでサーバーだけ
 otoa-asr-server --asr-model-dir=<dir>      # サーバー単体のバイナリ
 ```
-話し終えて少し黙ると、認識結果がカーソル位置へ貼り付きます。
 
 ## どれくらいの機械で動くか
 
