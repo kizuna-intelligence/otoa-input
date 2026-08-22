@@ -16,7 +16,7 @@
 use crossbeam_channel::unbounded as unbounded_channel;
 use otoa_input_core::ConnectionProvider;
 use otoa_input_platform::{PasteMethod, TextOutput};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 mod bundled_server;
 mod check_connection;
@@ -63,9 +63,11 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
 
 使い方:
   otoa-input [オプション]
+  otoa-input --serve [サーバーオプション]
 
 オプション:
   --serve             ASR サーバーだけを動かす（画面は出さない）
+                      詳細は otoa-input --serve --help
   --check-connection  接続先へ繋いで結果を表示し、終了する
   --paste-test [文字列]
                       貼り付けだけを 1 回試して終了する。
@@ -78,6 +80,36 @@ Linux なら ~/.config/otoa-input-oss/settings.json。
 接続先が空のときは、同梱の otoa-asr-server を既定の設定で起動した
 アドレス (ws://127.0.0.1:8770/asr/v1) へ繋ぐ。
 ";
+
+fn server_arguments(arguments: &[String]) -> Option<Vec<String>> {
+    arguments
+        .iter()
+        .any(|argument| argument == "--serve")
+        .then(|| {
+            arguments
+                .iter()
+                .filter(|argument| argument.as_str() != "--serve")
+                .cloned()
+                .collect()
+        })
+}
+
+fn run_server(arguments: &[String]) -> anyhow::Result<()> {
+    if otoa_asr_server::Config::help_requested(arguments) {
+        print!(
+            "{}",
+            otoa_asr_server::USAGE.replace("otoa-asr-server", "otoa-input --serve")
+        );
+        return Ok(());
+    }
+
+    let environment = std::env::vars().collect::<HashMap<_, _>>();
+    let config = otoa_asr_server::Config::from_sources(arguments, &environment)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(otoa_asr_server::run(config))
+}
 
 /// 貼り付けだけを 1 回試す。
 ///
@@ -110,10 +142,19 @@ fn paste_test(text: &str) -> i32 {
     }
 }
 
-/// クライアントを起動する。`--check-connection` が渡されていれば接続確認だけ行う。
+/// クライアントを起動する。
+///
+/// `--serve` が渡されていれば ASR サーバーだけを、`--check-connection` が
+/// 渡されていれば接続確認だけを行う。
 pub fn run(deps: Deps) -> anyhow::Result<()> {
     otoa_input_platform::console::use_utf8_output();
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // サーバーモードは設定ファイル、多重起動ロック、音声デバイスの初期化より
+    // 前に分岐する。`--serve` 自体はサーバーの設定オプションではないので、
+    // Config へ渡す前に取り除く。
+    if let Some(arguments) = server_arguments(&arguments) {
+        return run_server(&arguments);
+    }
     // 使い方の表示は、多重起動の判定より先に行う。あとに置くと、
     // 起動中の `--help` が「already running」で終わる。
     if arguments
@@ -201,4 +242,34 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         to_ui,
     )?;
     ui::run(settings, ui_updates, runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_arguments;
+
+    #[test]
+    fn serve_flag_is_removed_before_forwarding_server_options() {
+        let arguments = vec![
+            "--port=9000".to_string(),
+            "--serve".to_string(),
+            "--asr-model-dir".to_string(),
+            "/tmp/model".to_string(),
+        ];
+
+        assert_eq!(
+            server_arguments(&arguments),
+            Some(vec![
+                "--port=9000".to_string(),
+                "--asr-model-dir".to_string(),
+                "/tmp/model".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn arguments_without_serve_flag_remain_in_client_mode() {
+        let arguments = vec!["--check-connection".to_string()];
+        assert_eq!(server_arguments(&arguments), None);
+    }
 }
