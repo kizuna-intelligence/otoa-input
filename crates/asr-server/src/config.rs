@@ -6,7 +6,28 @@ const DEFAULT_PORT: u16 = 8770;
 const DEFAULT_PATH: &str = "/asr/v1";
 const DEFAULT_ASR_THREADS: usize = 2;
 const DEFAULT_MAX_UTTERANCE_MS: u32 = 25_000;
-const DEFAULT_PARTIAL_INTERVAL_MS: u32 = 500;
+const DEFAULT_PARTIAL_INTERVAL_MS: u32 = 125;
+const DEFAULT_PARTIAL_TAIL_MARGIN_CHARS: usize = 0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AsrEngine {
+    K2,
+    Kodama,
+}
+
+impl std::str::FromStr for AsrEngine {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "reazonspeech" => Ok(Self::K2),
+            "kodama" => Ok(Self::Kodama),
+            _ => Err(format!(
+                "認識エンジン {value:?} は使えません。reazonspeech か kodama を指定してください。"
+            )),
+        }
+    }
+}
 
 /// Configuration for the Otoa ASR server.
 #[derive(Clone)]
@@ -15,6 +36,7 @@ pub struct Config {
     pub port: u16,
     pub path: String,
 
+    pub asr_engine: AsrEngine,
     pub asr_model_dir: PathBuf,
 
     pub asr_threads: usize,
@@ -23,8 +45,16 @@ pub struct Config {
     /// ASR は一度に 30 秒程度までしか扱えない。
     pub max_utterance_ms: u32,
 
+    /// 途中経過を出すか。kodama は途中の音声でも使える結果を返すので既定で有効、
+    /// reazonspeech は非ストリーミングのモデルなので既定で無効。
     pub pseudo_stream: bool,
+    /// 途中経過のために再デコードする間隔。短いほど早く表示できる。
+    /// 1 回の再デコードがこの間隔より長くかかる場合は、終わるまで次を投げない。
     pub partial_interval_ms: u32,
+    /// 途中結果として**表示しない**末尾の文字数。
+    /// 隣り合う 2 回の仮説が一致した部分から、さらにこの分だけ削って表示する。
+    /// 大きいほど表示が落ち着くが、最初の文字が出るまでが遅くなる。
+    pub partial_tail_margin_chars: usize,
 
     pub auth_token: Option<String>,
 
@@ -40,11 +70,13 @@ impl fmt::Debug for Config {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("path", &self.path)
+            .field("asr_engine", &self.asr_engine)
             .field("asr_model_dir", &self.asr_model_dir)
             .field("asr_threads", &self.asr_threads)
             .field("max_utterance_ms", &self.max_utterance_ms)
             .field("pseudo_stream", &self.pseudo_stream)
             .field("partial_interval_ms", &self.partial_interval_ms)
+            .field("partial_tail_margin_chars", &self.partial_tail_margin_chars)
             .field("auth_token", &self.auth_token.as_ref().map(|_| "***"))
             .field("dump_dir", &self.dump_dir)
             .finish()
@@ -57,11 +89,13 @@ impl Default for Config {
             host: DEFAULT_HOST.to_string(),
             port: DEFAULT_PORT,
             path: DEFAULT_PATH.to_string(),
+            asr_engine: AsrEngine::K2,
             asr_model_dir: PathBuf::from("models/reazonspeech-k2-v2"),
             asr_threads: DEFAULT_ASR_THREADS,
             max_utterance_ms: DEFAULT_MAX_UTTERANCE_MS,
             pseudo_stream: false,
             partial_interval_ms: DEFAULT_PARTIAL_INTERVAL_MS,
+            partial_tail_margin_chars: DEFAULT_PARTIAL_TAIL_MARGIN_CHARS,
             auth_token: None,
             dump_dir: None,
         }
@@ -77,12 +111,13 @@ impl Config {
         config.host = string_value("host", &arguments, environment, config.host)?;
         config.port = parse_value("port", &arguments, environment, config.port)?;
         config.path = string_value("path", &arguments, environment, config.path)?;
-        config.asr_model_dir = path_value(
-            "asr_model_dir",
-            &arguments,
-            environment,
-            config.asr_model_dir,
-        )?;
+        config.asr_engine = parse_value("asr_engine", &arguments, environment, config.asr_engine)?;
+        let default_model_dir = match config.asr_engine {
+            AsrEngine::K2 => config.asr_model_dir.clone(),
+            AsrEngine::Kodama => PathBuf::from("models/kodama-ja-streaming-small"),
+        };
+        config.asr_model_dir =
+            path_value("asr_model_dir", &arguments, environment, default_model_dir)?;
         config.asr_threads =
             parse_value("asr_threads", &arguments, environment, config.asr_threads)?;
         config.max_utterance_ms = parse_value(
@@ -91,17 +126,24 @@ impl Config {
             environment,
             config.max_utterance_ms,
         )?;
+        let default_pseudo_stream = config.asr_engine == AsrEngine::Kodama;
         config.pseudo_stream = parse_bool_value(
             "pseudo_stream",
             &arguments,
             environment,
-            config.pseudo_stream,
+            default_pseudo_stream,
         )?;
         config.partial_interval_ms = parse_value(
             "partial_interval_ms",
             &arguments,
             environment,
             config.partial_interval_ms,
+        )?;
+        config.partial_tail_margin_chars = parse_value(
+            "partial_tail_margin_chars",
+            &arguments,
+            environment,
+            config.partial_tail_margin_chars,
         )?;
 
         config.dump_dir =
@@ -163,12 +205,17 @@ otoa-asr-server — Otoa ASR Protocol v1 のサーバー
   --host=<addr>               待ち受けアドレス (既定: 127.0.0.1)
   --port=<port>               待ち受けポート (既定: 8770)
   --path=<path>               WebSocket のパス (既定: /asr/v1)
-  --asr-model-dir=<dir>       ReazonSpeech k2-v2 の ONNX を置いたディレクトリ
+  --asr-engine=<reazonspeech|kodama>
+                              認識エンジン (既定: reazonspeech)
+  --asr-model-dir=<dir>       認識モデルのファイルを置いたディレクトリ
   --asr-threads=<n>           認識スレッド数 (既定: 2)
   --max-utterance-ms=<ms>     finalize が来ないまま話し続けた場合の上限
                               (既定: 25000)
-  --partial-interval-ms=<ms>  途中経過を出す間隔 (既定: 500)
-  --pseudo-stream[=<bool>]    途中経過の再デコードを有効にする (既定: false)
+  --partial-interval-ms=<ms>  途中経過を出す間隔 (既定: 125)
+  --partial-tail-margin-chars=<n>
+                              途中結果の未確定末尾として残す文字数 (既定: 0)
+  --pseudo-stream[=<bool>]    途中経過の再デコードを有効にする
+                              (既定: kodama は true、reazonspeech は false)
   --auth-token=<token>        Authorization: Bearer に要求するトークン
   --dump-dir=<dir>            認識へ渡した音声を WAV で書き出す (調査用)
   -h, --help                  この使い方を表示する
@@ -185,11 +232,13 @@ fn parse_arguments(args: &[String]) -> Result<HashMap<String, String>> {
         "host",
         "port",
         "path",
+        "asr_engine",
         "asr_model_dir",
         "asr_threads",
         "max_utterance_ms",
         "pseudo_stream",
         "partial_interval_ms",
+        "partial_tail_margin_chars",
         "auth_token",
         "dump_dir",
     ];
@@ -323,7 +372,7 @@ fn optional_string_value(
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{AsrEngine, Config};
     use std::collections::HashMap;
 
     #[test]
@@ -332,10 +381,70 @@ mod tests {
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 8770);
         assert_eq!(config.path, "/asr/v1");
+        assert_eq!(config.asr_engine, AsrEngine::K2);
+        assert_eq!(
+            config.asr_model_dir,
+            std::path::PathBuf::from("models/reazonspeech-k2-v2")
+        );
         assert_eq!(config.asr_threads, 2);
         assert_eq!(config.max_utterance_ms, 25_000);
-        assert_eq!(config.partial_interval_ms, 500);
+        assert_eq!(config.partial_interval_ms, 125);
+        assert_eq!(config.partial_tail_margin_chars, 0);
         assert!(!config.pseudo_stream);
+    }
+
+    #[test]
+    fn kodama_changes_engine_specific_defaults() {
+        let args = vec!["--asr-engine=kodama".to_string()];
+        let config = Config::from_sources(&args, &HashMap::new()).expect("config should parse");
+        assert_eq!(config.asr_engine, AsrEngine::Kodama);
+        assert_eq!(
+            config.asr_model_dir,
+            std::path::PathBuf::from("models/kodama-ja-streaming-small")
+        );
+        assert!(config.pseudo_stream);
+
+        let args = vec![
+            "--asr-engine=kodama".to_string(),
+            "--asr-model-dir=/tmp/custom".to_string(),
+        ];
+        let config = Config::from_sources(&args, &HashMap::new()).expect("config should parse");
+        assert_eq!(
+            config.asr_model_dir,
+            std::path::PathBuf::from("/tmp/custom")
+        );
+
+        let args = vec![
+            "--asr-engine=kodama".to_string(),
+            "--pseudo-stream=false".to_string(),
+        ];
+        let config = Config::from_sources(&args, &HashMap::new()).expect("config should parse");
+        assert!(!config.pseudo_stream);
+    }
+
+    #[test]
+    fn tail_margin_accepts_cli_environment_and_zero() {
+        let args = vec!["--partial-tail-margin-chars=0".to_string()];
+        let config = Config::from_sources(&args, &HashMap::new()).expect("zero should be valid");
+        assert_eq!(config.partial_tail_margin_chars, 0);
+
+        let environment = HashMap::from([(
+            "OTOA_ASR_PARTIAL_TAIL_MARGIN_CHARS".to_string(),
+            "12".to_string(),
+        )]);
+        let config = Config::from_sources(&[], &environment).expect("config should parse");
+        assert_eq!(config.partial_tail_margin_chars, 12);
+    }
+
+    #[test]
+    fn engine_names_are_shared_by_cli_and_bundled_server() {
+        assert_eq!("reazonspeech".parse(), Ok(AsrEngine::K2));
+        assert_eq!("kodama".parse(), Ok(AsrEngine::Kodama));
+
+        let error = "whisper"
+            .parse::<AsrEngine>()
+            .expect_err("unknown engine should fail");
+        assert!(error.contains("reazonspeech か kodama"));
     }
 
     #[test]

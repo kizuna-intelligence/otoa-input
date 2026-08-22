@@ -158,16 +158,22 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
     // 接続先が自分の機械で、まだ誰も待ち受けていなければ、同梱の ASR サーバーを
     // 自分で立てる。**利用者に 2 つ起動させないため。**
     // 接続確認より前に行う。ここを後にすると --check-connection が必ず失敗する。
-    if let Ok(endpoint) = deps.provider.endpoint(&settings.core) {
-        match bundled_server::start_if_needed(&endpoint.url) {
+    let bundled_server_failure = if let Ok(endpoint) = deps.provider.endpoint(&settings.core) {
+        match bundled_server::start_if_needed(&endpoint.url, &settings.asr_engine) {
             Ok(Some(model_dir)) => {
-                tracing::info!(model_dir = %model_dir.display(), "同梱の ASR サーバーを起動した")
+                tracing::info!(model_dir = %model_dir.display(), "同梱の ASR サーバーを起動した");
+                None
             }
-            Ok(None) => {}
-            // 起動できなくても続ける。設定を直せば別の接続先を使える。
-            Err(message) => tracing::warn!(%message, "同梱の ASR サーバーを起動できない"),
+            Ok(None) => None,
+            // 起動できなくても続ける。設定画面でエンジンや接続先を直せるようにする。
+            Err(failure) => {
+                tracing::warn!(message = %failure, "同梱の ASR サーバーを起動できない");
+                Some(failure.into_readiness_message())
+            }
         }
-    }
+    } else {
+        None
+    };
 
     if check_connection {
         std::process::exit(check_connection::run(&settings, deps.provider));
@@ -188,6 +194,11 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         Err(error) => tracing::warn!(%error, "failed to list input devices"),
     }
     let (to_ui, ui_updates) = unbounded_channel();
-    let runtime = wiring::start(settings.clone(), deps.provider, to_ui)?;
+    let runtime = wiring::start(
+        settings.clone(),
+        deps.provider,
+        bundled_server_failure,
+        to_ui,
+    )?;
     ui::run(settings, ui_updates, runtime)
 }

@@ -232,7 +232,7 @@ fn normal_content(state: UiState) -> impl IntoView {
                 .height(40.0)
                 .text_ellipsis()
         }),
-        label(move || state.overlay_error.get()).style(|style| {
+        label(move || display_error(&state.overlay_error.get())).style(|style| {
             style
                 .width_full()
                 .font_family(theme::font_family().to_string())
@@ -255,16 +255,42 @@ fn splash_status(login_state: &LoginState) -> &'static str {
 fn display_text(text: &str) -> String {
     const LINE_LIMIT: usize = 40;
     const MAX_CHARS: usize = LINE_LIMIT * 2;
-    let mut chars = text.chars().take(MAX_CHARS).collect::<Vec<_>>();
-    if text.chars().count() > MAX_CHARS {
-        if let Some(last) = chars.last_mut() {
-            *last = '…';
-        }
-    }
+    let text_chars = text.chars().collect::<Vec<_>>();
+    let mut chars = if text_chars.len() > MAX_CHARS {
+        let mut tail = Vec::with_capacity(MAX_CHARS);
+        tail.push('…');
+        tail.extend_from_slice(&text_chars[text_chars.len() - (MAX_CHARS - 1)..]);
+        tail
+    } else {
+        text_chars
+    };
     if chars.len() > LINE_LIMIT && !chars[..LINE_LIMIT].contains(&'\n') {
         chars.insert(LINE_LIMIT, '\n');
     }
     chars.into_iter().collect()
+}
+
+/// エラー文を折り返す。
+///
+/// **転記テキストと違い、大事なのは先頭である**（何が起きたか）。
+/// だから末尾ではなく先頭を残し、`LINE_LIMIT` ごとに折り返す。
+/// 折り返さないと 1 行のまま溢れて、右端で切れて読めなくなる（実際に起きた）。
+fn display_error(text: &str) -> String {
+    const LINE_LIMIT: usize = 34;
+    const MAX_LINES: usize = 3;
+    let chars = text.chars().collect::<Vec<_>>();
+    let limit = LINE_LIMIT * MAX_LINES;
+    let mut lines = Vec::new();
+    for chunk in chars.chunks(LINE_LIMIT).take(MAX_LINES) {
+        lines.push(chunk.iter().collect::<String>());
+    }
+    if chars.len() > limit {
+        if let Some(last) = lines.last_mut() {
+            last.pop();
+            last.push('…');
+        }
+    }
+    lines.join("\n")
 }
 
 /// オーバーレイに出す状態名。色だけでは何が起きているか分からない。
@@ -294,5 +320,68 @@ fn overlay_summary(mode: OverlayMode) -> &'static str {
             OverlayKind::Error => "error",
             OverlayKind::LoginNeeded => "login-needed",
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_text;
+
+    #[test]
+    fn display_text_keeps_exactly_eighty_characters() {
+        let text = "a".repeat(80);
+        assert_eq!(
+            display_text(&text),
+            format!("{}\n{}", "a".repeat(40), "a".repeat(40))
+        );
+    }
+
+    #[test]
+    fn display_text_keeps_the_tail_after_eighty_characters() {
+        let text = format!("discard{}", "z".repeat(79));
+        let displayed = display_text(&text);
+
+        assert_eq!(
+            displayed,
+            format!("…{}\n{}", "z".repeat(39), "z".repeat(40))
+        );
+        assert!(!displayed.contains("discard"));
+    }
+
+    #[test]
+    fn display_text_truncates_japanese_at_character_boundaries() {
+        let text = format!("捨てる{}末尾", "語".repeat(80));
+        let displayed = display_text(&text);
+
+        assert!(displayed.starts_with('…'));
+        assert!(displayed.ends_with("末尾"));
+        assert_eq!(
+            displayed
+                .chars()
+                .filter(|character| *character != '\n')
+                .count(),
+            80
+        );
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::display_error;
+
+    #[test]
+    fn long_error_wraps_instead_of_overflowing_one_line() {
+        let text = "認識モデル kodama-ja-streaming-small が見つかりません。設定から認識エンジンを選び直すか、README の手順でモデルを置いてください";
+        let displayed = display_error(text);
+        assert!(displayed.contains('\n'), "折り返されていない: {displayed}");
+        for line in displayed.lines() {
+            assert!(line.chars().count() <= 34, "行が長すぎる: {line}");
+        }
+        assert!(displayed.starts_with("認識モデル"), "先頭が残っていない");
+    }
+
+    #[test]
+    fn short_error_is_unchanged() {
+        assert_eq!(display_error("接続できません"), "接続できません");
     }
 }

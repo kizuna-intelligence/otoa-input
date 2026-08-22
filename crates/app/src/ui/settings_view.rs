@@ -22,6 +22,18 @@ struct MicrophoneChoice {
     label: String,
 }
 
+#[derive(Clone)]
+struct AsrEngineChoice {
+    id: String,
+    label: String,
+}
+
+impl std::fmt::Display for AsrEngineChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.label.fmt(formatter)
+    }
+}
+
 impl std::fmt::Display for MicrophoneChoice {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.label.fmt(formatter)
@@ -38,6 +50,14 @@ pub fn view(
     let language = RwSignal::new(language_label(&settings.language_hints));
     let listening_enabled = RwSignal::new(settings.listening_enabled);
     let auto_paste = RwSignal::new(settings.auto_paste);
+    let asr_engine_choices = asr_engine_choices();
+    let selected_asr_engine = RwSignal::new(
+        asr_engine_choices
+            .iter()
+            .find(|choice| choice.id == settings.asr_engine)
+            .cloned()
+            .unwrap_or_else(|| asr_engine_choices[0].clone()),
+    );
     let gain = RwSignal::new(gain_to_pct(settings.input_gain));
     let vad_model_path = RwSignal::new(settings.vad_model_path.clone());
     let vad_threshold = RwSignal::new(settings.vad_threshold.to_string());
@@ -75,6 +95,7 @@ pub fn view(
             next.language_hints = language_hints(&language.get_untracked());
             next.listening_enabled = listening_enabled.get_untracked();
             next.auto_paste = auto_paste.get_untracked();
+            next.asr_engine = selected_asr_engine.get_untracked().id;
             next.input_gain = gain_from_pct(gain.get_untracked());
             next.vad_model_path = vad_model_path.get_untracked();
             next.vad_threshold = parse_or(&vad_threshold.get_untracked(), settings.vad_threshold);
@@ -225,6 +246,15 @@ pub fn view(
         "待受と確定結果の扱いを設定します。",
         v_stack((
             field(
+                "認識エンジン（再起動後に反映）",
+                Dropdown::new(
+                    move || selected_asr_engine.get(),
+                    asr_engine_choices.clone(),
+                )
+                .on_accept(move |choice| selected_asr_engine.set(choice))
+                .style(input_style),
+            ),
+            field(
                 "待受を起動時に有効にする",
                 labeled_checkbox(
                     move || listening_enabled.get(),
@@ -371,6 +401,19 @@ pub fn view(
             .color(theme::color::TEXT)
     })
     .on_cleanup(move || state.settings_window_open.set(false))
+}
+
+fn asr_engine_choices() -> Vec<AsrEngineChoice> {
+    vec![
+        AsrEngineChoice {
+            id: "reazonspeech".to_string(),
+            label: "ReazonSpeech k2-v2（精度優先・メモリ 約1.3GB）".to_string(),
+        },
+        AsrEngineChoice {
+            id: "kodama".to_string(),
+            label: "kodama（軽量・メモリ 約450MB）".to_string(),
+        },
+    ]
 }
 
 fn resize_settings_window(

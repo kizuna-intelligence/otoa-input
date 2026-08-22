@@ -18,7 +18,8 @@ pub fn set_app_directory(name: &str) {
     let _ = APP_DIRECTORY.set(name.to_string());
 }
 
-fn app_directory() -> &'static str {
+/// 設定・データ・インスタンスロックを配布ごとに分ける識別名。
+pub(crate) fn app_identifier() -> &'static str {
     APP_DIRECTORY
         .get()
         .map(String::as_str)
@@ -28,7 +29,7 @@ fn app_directory() -> &'static str {
 /// 設定ファイルのパス。親ディレクトリは作る。
 pub fn settings_path() -> Result<PathBuf> {
     let config_dir = dirs::config_dir().context("failed to determine config directory")?;
-    let app_dir = config_dir.join(app_directory());
+    let app_dir = config_dir.join(app_identifier());
     std::fs::create_dir_all(&app_dir)
         .with_context(|| format!("failed to create settings directory {}", app_dir.display()))?;
     Ok(app_dir.join("settings.json"))
@@ -38,7 +39,7 @@ pub fn settings_path() -> Result<PathBuf> {
 /// Linux なら `~/.local/share/<ディレクトリ名>`。
 pub fn data_directory() -> Result<PathBuf> {
     let base = dirs::data_dir().context("failed to determine data directory")?;
-    let directory = base.join(app_directory());
+    let directory = base.join(app_identifier());
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("failed to create data directory {}", directory.display()))?;
     Ok(directory)

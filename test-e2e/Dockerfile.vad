@@ -1,0 +1,8 @@
+# VAD の CPU probe 専用。配布物検証用 Dockerfile にツールチェーンを入れない。
+FROM rust:1.94-bookworm
+
+WORKDIR /work
+COPY . /work
+RUN cargo build --release -p otoa-input-vad --example cpu_probe
+
+ENTRYPOINT ["/work/target/release/examples/cpu_probe"]

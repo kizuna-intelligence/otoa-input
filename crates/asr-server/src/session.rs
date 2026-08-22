@@ -1,4 +1,4 @@
-use crate::{asr::Transcriber, audio::SAMPLE_RATE, config::Config};
+use crate::{agreement::Agreement, asr::Transcriber, audio::SAMPLE_RATE, config::Config};
 use anyhow::{anyhow, Result};
 use otoa_input_protocol::{AsrConfig, AsrResponse, AsrToken, TOKEN_END, TOKEN_FIN};
 use std::{sync::Arc, time::Instant};
@@ -256,6 +256,7 @@ pub struct Session {
     config: Config,
     settings: Option<AsrConfig>,
     pseudo: PseudoStream,
+    agreement: Agreement,
     pcm_input: Pcm16Buffer,
     pending_responses: Vec<AsrResponse>,
 }
@@ -267,11 +268,13 @@ impl Session {
             config.partial_interval_ms,
             config.pseudo_stream,
         );
+        let agreement = Agreement::new(config.partial_tail_margin_chars);
         Self {
             state: SessionState::Connecting,
             config,
             settings: None,
             pseudo,
+            agreement,
             pcm_input: Pcm16Buffer::default(),
             pending_responses: Vec::new(),
         }
@@ -361,6 +364,7 @@ impl Session {
                 .await
                 .map_err(SessionError::Recognition)?
             {
+                let text = self.agreement.observe(&text);
                 if !text.is_empty() {
                     // A partial is always the entire current transcription in a
                     // single non-final token; clients replace the prior partial.
@@ -454,6 +458,7 @@ impl Session {
 
     fn clear_utterance(&mut self) {
         self.pseudo.clear();
+        self.agreement.reset();
     }
 
     fn take_pending_action(&mut self) -> SessionAction {

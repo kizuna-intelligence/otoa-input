@@ -24,6 +24,18 @@ pub struct SileroVad {
 /// 2.3 MB なので埋め込む方が扱いやすい。
 pub const BUNDLED_MODEL: &[u8] = include_bytes!("../../../resources/models/silero_vad.onnx");
 
+/// `SessionBuilder` の設定は失敗すると builder ごと返す型になっている。
+/// anyhow へ寄せるための小さな受け皿。
+fn tune(
+    result: Result<
+        ort::session::builder::SessionBuilder,
+        ort::Error<ort::session::builder::SessionBuilder>,
+    >,
+    what: &str,
+) -> Result<ort::session::builder::SessionBuilder> {
+    result.map_err(|error| anyhow::anyhow!("failed to set VAD {what}: {error}"))
+}
+
 impl SileroVad {
     /// 埋め込んだモデルを読み込む。外部ファイルは要らない。
     pub fn bundled() -> Result<Self> {
@@ -39,8 +51,19 @@ impl SileroVad {
     }
 
     fn from_model_bytes(bytes: &[u8], origin: &str) -> Result<Self> {
-        let session = Session::builder()
-            .context("failed to create ONNX Runtime session builder")?
+        otoa_input_onnx::ensure_initialized()?;
+        // **スレッドを 1 本に絞り、スピンを止める。**
+        // ONNX Runtime の既定は intra_op スレッド数がコア数で、しかも
+        // 待つ間スピンする。VAD は 512 サンプル（32ms）ごとに走る小さなモデルで、
+        // 常時鳴らし続けるものである。既定のままだと、待受しているだけで
+        // 何コアも焼く（20 コアの機械で 6 コアを占有するのを実測した）。
+        let builder =
+            Session::builder().context("failed to create ONNX Runtime session builder")?;
+        let builder = tune(builder.with_intra_threads(1), "intra-op threads")?;
+        let builder = tune(builder.with_intra_op_spinning(false), "intra-op spinning")?;
+        let builder = tune(builder.with_inter_threads(1), "inter-op threads")?;
+        let mut builder = tune(builder.with_inter_op_spinning(false), "inter-op spinning")?;
+        let session = builder
             .commit_from_memory(bytes)
             .with_context(|| format!("failed to load VAD model {origin}"))?;
 
@@ -156,6 +179,7 @@ mod tests {
 
     #[test]
     fn hop_and_context_constants() {
+        let _link_sherpa = std::mem::size_of::<sherpa_onnx::OfflineRecognizerConfig>();
         assert_eq!(VAD_SAMPLE_RATE, 16_000);
         assert_eq!(VAD_HOP, 512);
         assert_eq!(VAD_CONTEXT, 64);

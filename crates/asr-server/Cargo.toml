@@ -17,6 +17,7 @@ anyhow.workspace = true
 futures-util.workspace = true
 otoa-input-platform = { path = "../platform" }
 otoa-input-protocol = { path = "../protocol" }
+otoa-input-kodama = { path = "../kodama" }
 serde_json.workspace = true
 sherpa-onnx.workspace = true
 thiserror.workspace = true

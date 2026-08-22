@@ -1,6 +1,7 @@
 use crate::{
     asr::{Asr, Transcriber},
-    config::Config,
+    config::{AsrEngine, Config},
+    kodama_asr::KodamaAsr,
     session::{Session, SessionState},
 };
 use anyhow::{Context, Result};
@@ -20,12 +21,10 @@ use tokio_tungstenite::{
 };
 
 pub async fn run(config: Config) -> Result<()> {
-    let asr_model_dir = config.asr_model_dir.clone();
-    let asr_threads = config.asr_threads;
-    let asr = tokio::task::spawn_blocking(move || Asr::load(&asr_model_dir, asr_threads))
+    let loader_config = config.clone();
+    let transcriber = tokio::task::spawn_blocking(move || load_transcriber(&loader_config))
         .await
         .context("ASR model worker failed")??;
-    let asr = Arc::new(asr);
 
     let listener = TcpListener::bind((config.host.as_str(), config.port))
         .await
@@ -45,9 +44,9 @@ pub async fn run(config: Config) -> Result<()> {
             .await
             .context("failed to accept connection")?;
         let config = Arc::clone(&config);
-        let asr = Arc::clone(&asr);
+        let transcriber = Arc::clone(&transcriber);
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, peer, config, asr).await {
+            if let Err(error) = handle_connection(stream, peer, config, transcriber).await {
                 tracing::error!(%error, "ASR connection failed");
             }
         });
@@ -58,7 +57,7 @@ async fn handle_connection(
     stream: TcpStream,
     peer: std::net::SocketAddr,
     config: Arc<Config>,
-    asr: Arc<Asr>,
+    transcriber: Arc<dyn Transcriber>,
 ) -> Result<()> {
     let callback_config = Arc::clone(&config);
     // Err の型は tungstenite のハンドシェイクコールバックが決めており、
@@ -87,7 +86,6 @@ async fn handle_connection(
     };
     tracing::info!(peer = %peer, "connection accepted");
 
-    let transcriber: Arc<dyn Transcriber> = asr;
     let mut session = Session::new((*config).clone(), transcriber);
     let mut close_code = None;
 
@@ -142,6 +140,19 @@ async fn handle_connection(
     }
     tracing::info!(peer = %peer, close_code = ?close_code, "connection disconnected");
     Ok(())
+}
+
+fn load_transcriber(config: &Config) -> Result<Arc<dyn Transcriber>> {
+    match config.asr_engine {
+        AsrEngine::K2 => Ok(Arc::new(Asr::load(
+            &config.asr_model_dir,
+            config.asr_threads,
+        )?)),
+        AsrEngine::Kodama => Ok(Arc::new(KodamaAsr::load(
+            &config.asr_model_dir,
+            config.asr_threads,
+        )?)),
+    }
 }
 
 fn authorization_is_valid(request: &Request, expected_token: Option<&str>) -> bool {

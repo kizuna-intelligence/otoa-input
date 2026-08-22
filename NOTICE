@@ -30,6 +30,18 @@ ReazonSpeech k2-v2
   Apache License, Version 2.0
   https://huggingface.co/reazon-research/reazonspeech-k2-v2
 
+kodama-ja-streaming-small
+  Copyright (c) 2026 yousan (https://huggingface.co/ayousanz)
+  Apache License, Version 2.0
+  https://huggingface.co/ayousanz/kodama-ja-streaming-small
+  Upstream NOTICE (must be retained when redistributing the model):
+  https://huggingface.co/ayousanz/kodama-ja-streaming-small/blob/main/NOTICE
+
+  The tokenizer and model architecture come from
+  moonshine-ai/moonshine-streaming-small under the MIT License.
+  Copyright (c) 2025 Useful Sensors, Inc. (dba Moonshine AI)
+  The full MIT notice is included in the upstream NOTICE linked above.
+
 --------------------------------------------------------------------------
 Rust crates
 --------------------------------------------------------------------------

@@ -20,7 +20,7 @@
 [どれくらいの機械で動くか](#どれくらいの機械で動くか)に。
 
 - クライアント — マイク取得、VAD、オーバーレイ、貼り付け（Linux / macOS / Windows）
-- サーバー — [ReazonSpeech k2-v2](https://huggingface.co/reazon-research/reazonspeech-k2-v2) による日本語音声認識
+- サーバー — ReazonSpeech k2-v2 / kodama-ja-streaming-small による日本語音声認識
 - 両者は WebSocket の **Otoa ASR Protocol v1** で話す（[`docs/otoa_asr_protocol.md`](docs/otoa_asr_protocol.md)）
 
 ## 使ってみる
@@ -47,17 +47,49 @@
 
 音声認識のモデルは大きい（数百 MB）ので同梱していません。別に取ります。
 
+| | ReazonSpeech k2-v2 | kodama-ja-streaming-small |
+|---|---|---|
+| モデル | 587MB | 309MB |
+| メモリ（実測ピーク RSS） | 約 1315MB | 約 450MB |
+| 速度（RTF・CPU 2 スレッド） | 0.024〜0.029 | 0.041〜0.053 |
+| ライセンス | Apache-2.0 | Apache-2.0 |
+
+既定は ReazonSpeech k2-v2 で、精度を優先する場合に向きます。kodama はメモリを
+抑えたい場合の選択肢ですが、**雑音に弱く、SNR 10dB で劣化が大きいほか、短い
+発話と固有名詞が苦手**です。
+
+**kodama は長い発話も苦手です。** 手元で測った文字誤り率は、7 秒までは 0.00
+ですが、10 秒で 0.42、20 秒で 0.74 まで悪化し、20 秒では最初の発話が丸ごと
+落ちました。息継ぎのたびにクライアントが区切るので通常は問題になりませんが、
+**息継ぎなしで話し続けると結果が壊れます。**
+
+ReazonSpeech k2-v2 を使う場合:
+
 ```bash
 pip install -U "huggingface_hub[cli]"
 hf download reazon-research/reazonspeech-k2-v2 --local-dir reazonspeech-k2-v2
 ```
 
-**取れたフォルダを、次のどちらかに `reazonspeech-k2-v2` という名前で置きます。**
+kodama を使う場合:
 
-| | 置き場所 |
-|---|---|
-| 本体の隣（持ち歩くならこちら） | `<本体と同じ場所>/models/reazonspeech-k2-v2` |
-| ユーザーごとの場所 | Linux: `~/.local/share/otoa-input-oss/models/reazonspeech-k2-v2`<br>macOS: `~/Library/Application Support/otoa-input-oss/models/reazonspeech-k2-v2`<br>Windows: `%APPDATA%\otoa-input-oss\models\reazonspeech-k2-v2` |
+```bash
+pip install -U "huggingface_hub[cli]"
+hf download ayousanz/kodama-ja-streaming-small \
+  --include tokenizer.json --include "onnx/*" --local-dir kodama-download
+mkdir kodama-ja-streaming-small
+cp kodama-download/onnx/* kodama-download/tokenizer.json kodama-ja-streaming-small/
+```
+
+kodama に必要なのは `onnx/` にある5ファイルと `tokenizer.json` です。5ファイルには
+`encoder.onnx.data` と `cross_kv_prefill.onnx.data` も含まれます。**`.onnx.data` を
+忘れるとモデルの読み込みに失敗します。**
+
+**取れたフォルダを、次のどちらかにエンジンごとの名前で置きます。**
+
+| | ReazonSpeech k2-v2 | kodama-ja-streaming-small |
+|---|---|---|
+| 本体の隣（持ち歩くならこちら） | `<本体と同じ場所>/models/reazonspeech-k2-v2` | `<本体と同じ場所>/models/kodama-ja-streaming-small` |
+| ユーザーごとの場所 | Linux: `~/.local/share/otoa-input-oss/models/reazonspeech-k2-v2`<br>macOS: `~/Library/Application Support/otoa-input-oss/models/reazonspeech-k2-v2`<br>Windows: `%APPDATA%\otoa-input-oss\models\reazonspeech-k2-v2` | Linux: `~/.local/share/otoa-input-oss/models/kodama-ja-streaming-small`<br>macOS: `~/Library/Application Support/otoa-input-oss/models/kodama-ja-streaming-small`<br>Windows: `%APPDATA%\otoa-input-oss\models\kodama-ja-streaming-small` |
 
 例（Linux で本体の隣に置く場合）:
 
@@ -70,6 +102,8 @@ models/
     joiner-epoch-99-avg-1.onnx
     tokens.txt
 ```
+
+使うエンジンは設定画面の「認識エンジン（再起動後に反映）」で選びます。
 
 ### 3. 起動する
 
@@ -106,7 +140,8 @@ sudo apt install \
 ```
 
 - **「認識モデルが見つかりません」** → 上の置き場所を確認してください。
-  フォルダ名は `reazonspeech-k2-v2`、中に `tokens.txt` がある状態です
+  ReazonSpeech は `reazonspeech-k2-v2` の中に `tokens.txt`、kodama は
+  `kodama-ja-streaming-small` の中に `tokenizer.json` がある状態です
 - **認識はできるのに貼り付かない（Linux）** → `xdotool` / `wtype` を入れます
 - **貼り付かない（macOS）** → システム設定 → プライバシーとセキュリティ →
   アクセシビリティ で `Otoa Input` を許可します
@@ -181,12 +216,13 @@ VAD モデルはバイナリへ埋め込み）。別途要るのは認識モデ�
 
 設定画面（トレイアイコン →「設定」）から変更できます。設定ファイルの場所は
 Linux なら `~/.config/otoa-input-oss/settings.json`、認識モデルの既定の探索先は
-`~/.local/share/otoa-input-oss/models/reazonspeech-k2-v2` です。
+`~/.local/share/otoa-input-oss/models/<選んだモデル名>` です。
 
 
 | 項目 | 既定 | 説明 |
 |---|---|---|
 | サーバー URL | `ws://127.0.0.1:8770/asr/v1` | 接続先 |
+| 認識エンジン | `reazonspeech` | 同梱サーバーで使うモデル。変更は再起動後に反映 |
 | 発話終了の判定 | `client` | 同梱サーバーは `client` のみ |
 | VAD しきい値 | 0.5 | 上げると拾いにくく、下げると誤検知が増える |
 | 無音判定 | 300 ms | これだけ黙ると区切る |
