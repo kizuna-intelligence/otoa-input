@@ -1,0 +1,61 @@
+# THIRD-PARTY LICENSES / 第三者ライセンス
+
+Otoa Input {{#if crates}}{{/if}}の配布物には、次の第三者ソフトウェアが
+含まれています。それぞれのライセンス条件が適用されます。
+
+このファイルは `cargo about generate` で自動生成しています。手で編集しないで
+ください。更新するには `bash scripts/generate-licenses.sh` を実行します。
+
+## MPL-2.0 の依存について — 対象ソースコードの入手方法
+
+MPL-2.0 は**ファイル単位のコピーレフト**です。配布物には次のクレートが
+MPL-2.0 で含まれています。
+
+| クレート | 版 |
+|---|---|
+| bitmaps | 2.1.0 |
+| im | 15.1.0 |
+| im-rc | 15.1.0 |
+| option-ext | 0.2.0 |
+| resvg | 0.43.0 |
+| sized-chunks | 0.6.5 |
+| usvg | 0.43.0 |
+
+**いずれも改変せず、crates.io で公開されているものをそのまま使っています。**
+配布したバージョンに対応する対象ソースコードは、次のいずれかで入手できます。
+
+1. crates.io から版を指定して取得する
+
+   ```
+   cargo download <クレート名>==<版>
+   # または
+   curl -LO https://crates.io/api/v1/crates/<クレート名>/<版>/download
+   ```
+
+2. この配布物と同じ版を、リポジトリの `Cargo.lock` から特定して取得する
+
+   ```
+   git clone https://github.com/kizuna-intelligence/otoa-input
+   cd otoa-input && git checkout <この配布物のタグ>
+   cargo vendor    # Cargo.lock に固定された版のソースが vendor/ に展開される
+   ```
+
+`Cargo.lock` はリポジトリに含めてあり、**配布物の各版に対応するタグから
+正確な版を再現できます。**
+
+---
+
+{{#each licenses}}
+## {{name}}
+
+適用されるクレート:
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} — {{crate.repository}}{{/if}}
+{{/each}}
+
+```
+{{text}}
+```
+
+{{/each}}

@@ -49,7 +49,10 @@ for binary in otoa-input otoa-asr-server; do
     cp "$src" "$STAGE/"
 done
 
-cp README.md LICENSE NOTICE "$STAGE/"
+# 第三者ライセンスの表示。**配布のたびに作り直す。** 依存が変われば内容も
+# 変わるので、手で管理すると必ずずれる。
+bash scripts/generate-licenses.sh
+cp README.md LICENSE NOTICE THIRD-PARTY-LICENSES.md "$STAGE/"
 
 cat > "$STAGE/はじめに.txt" <<EOF
 Otoa Input $VERSION ($OS/$ARCH)

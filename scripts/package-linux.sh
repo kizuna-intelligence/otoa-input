@@ -36,6 +36,11 @@ cp target/release/otoa-input "$APPDIR/usr/bin/"
 cp resources/icons/otoa-input-192.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/otoa-input.png"
 cp resources/icons/otoa-input-192.png "$APPDIR/otoa-input.png"
 
+# 第三者ライセンスの表示を同梱する。AppImage の中と、隣に置く分の両方。
+bash scripts/generate-licenses.sh
+mkdir -p "$APPDIR/usr/share/doc/otoa-input"
+cp LICENSE NOTICE THIRD-PARTY-LICENSES.md "$APPDIR/usr/share/doc/otoa-input/"
+
 cat > "$APPDIR/otoa-input.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application

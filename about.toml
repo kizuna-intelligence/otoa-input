@@ -1,0 +1,30 @@
+# 配布物に含まれる第三者クレートのライセンスを集める設定。
+#
+# **accepted は「この配布物に入れてよいライセンス」の一覧である。**
+# 新しい依存が持ち込んだライセンスがここに無いと生成が失敗する。
+# 増えたときは、黙って足さずに条件を確認すること。
+accepted = [
+    # 表示だけで足りるもの
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "CC0-1.0",
+    # ファイル単位のコピーレフト。**改変した場合、そのファイルのソース公開が要る。**
+    # 改変せずそのまま使う限りは、対象ソースの入手方法を示せばよい。
+    "MPL-2.0",
+]
+
+# ワークスペース内のクレートは自分のものなので対象外。
+[otoa-input-app]
+[otoa-input-core]
+[otoa-input-platform]
+[otoa-input-protocol]
+[otoa-input-vad]
+[otoa-asr-server]
