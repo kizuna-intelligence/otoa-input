@@ -57,18 +57,12 @@ impl SileroVad {
         // 待つ間スピンする。VAD は 512 サンプル（32ms）ごとに走る小さなモデルで、
         // 常時鳴らし続けるものである。既定のままだと、待受しているだけで
         // 何コアも焼く（20 コアの機械で 6 コアを占有するのを実測した）。
-        // **スレッドを 1 本に絞り、スピンを止める。**
-        // ONNX Runtime の既定は intra_op スレッド数がコア数で、しかも
-        // 待つ間スピンする。VAD は 512 サンプル（32ms）ごとに走る小さなモデルで、
-        // 常時鳴らし続けるものである。既定のままだと、待受しているだけで
-        // 何コアも焼く（20 コアの機械で 6 コアを占有するのを実測した）。
         let builder =
             Session::builder().context("failed to create ONNX Runtime session builder")?;
         let builder = tune(builder.with_intra_threads(1), "intra-op threads")?;
         let builder = tune(builder.with_intra_op_spinning(false), "intra-op spinning")?;
         let builder = tune(builder.with_inter_threads(1), "inter-op threads")?;
-        let builder = tune(builder.with_inter_op_spinning(false), "inter-op spinning")?;
-        let mut builder = builder;
+        let mut builder = tune(builder.with_inter_op_spinning(false), "inter-op spinning")?;
         let session = builder
             .commit_from_memory(bytes)
             .with_context(|| format!("failed to load VAD model {origin}"))?;

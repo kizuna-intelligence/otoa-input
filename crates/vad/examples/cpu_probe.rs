@@ -1,5 +1,12 @@
-//! VAD を実時間相当で回したときの CPU 使用を測る。GUI を出さずに確かめるため。
-//! `cargo run --release -p otoa-input-vad --example cpu_probe`
+//! VAD を実時間相当で回したときの CPU 使用と 1 フレームの処理時間を測る。
+//! GUI を出さずに確かめるためにある。
+//!
+//! ```text
+//! cargo run --release -p otoa-input-vad --example cpu_probe
+//! ```
+//!
+//! **Linux 専用。** CPU 時間とスレッド数を `/proc` から読んでいる。
+//! 他の OS では 0 が出るだけで、意味のある値にならない。
 fn main() -> anyhow::Result<()> {
     // sherpa-onnx が持つ ONNX Runtime を実行ファイルへ引き込むための参照。
     // crates/onnx のテストと同じ理由（OrtGetApiBase の解決）。
@@ -12,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     let cpu0 = cpu_seconds();
     let mut frames = 0u32;
     let mut lat: Vec<f64> = Vec::new();
-    // 32ms ごとに 1 回。実時間 10 秒ぶん。
+    // 32ms ごとに 1 回（実際の VAD と同じ間隔）。実時間 4 秒ぶん回す。
     while started.elapsed() < std::time::Duration::from_secs(4) {
         out.clear();
         let t = std::time::Instant::now();
@@ -24,7 +31,7 @@ fn main() -> anyhow::Result<()> {
     let wall = started.elapsed().as_secs_f64();
     let cpu = cpu_seconds() - cpu0;
     println!("スレッド数(実行中): {}", threads());
-    lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    lat.sort_by(f64::total_cmp);
     let pct = |p: f64| lat[((lat.len() as f64 - 1.0) * p) as usize];
     println!(
         "1フレームの処理時間 中央値 {:.3}ms / p95 {:.3}ms / 最大 {:.3}ms",
