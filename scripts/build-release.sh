@@ -54,25 +54,62 @@ done
 bash scripts/generate-licenses.sh
 cp README.md LICENSE NOTICE THIRD-PARTY-LICENSES.md "$STAGE/"
 
+# **OS ごとに書き分ける。** 起動コマンドも、貼り付けに要るものも、出る警告も
+# OS で違う。1 つの文面を使い回すと、Windows の利用者に「./otoa-input」と
+# 「xdotool を入れろ」を読ませることになる（0.1.4 で実際にそうなっていた）。
+case "$OS" in
+    windows)
+        LAUNCH='otoa-input.exe'
+        CONT='^'
+        PLATFORM_NOTE='署名していないため、初回起動時に Windows の SmartScreen が
+「WindowsによってPCが保護されました」と警告します。
+［詳細情報］→［実行］で起動できます。'
+        ;;
+    macos)
+        LAUNCH='./otoa-input'
+        CONT='\'
+        PLATFORM_NOTE='システム設定 →「プライバシーとセキュリティ」→「アクセシビリティ」と
+「マイク」で otoa-input を許可してください。許可しないと、認識はできるのに
+貼り付けだけが失敗します。'
+        ;;
+    *)
+        LAUNCH='./otoa-input'
+        CONT='\'
+        PLATFORM_NOTE='貼り付けに xdotool（Wayland では wtype）が要ります。
+入っていないと、認識はできるのに貼り付けだけが失敗します。'
+        ;;
+esac
+
 cat > "$STAGE/はじめに.txt" <<EOF
 Otoa Input $VERSION ($OS/$ARCH)
 
 1. 認識モデルを取得する（同梱していない）
 
+   精度を優先するなら ReazonSpeech k2-v2（587MB、既定）:
+
    pip install -U "huggingface_hub[cli]"
-   hf download reazon-research/reazonspeech-k2-v2 \\
+   hf download reazon-research/reazonspeech-k2-v2 $CONT
        --local-dir models/reazonspeech-k2-v2
 
-2. otoa-input を起動する
+   メモリを抑えたいなら kodama（309MB）:
 
-   ./otoa-input
+   hf download ayousanz/kodama-ja-streaming-small $CONT
+       --include tokenizer.json --include "onnx/*" $CONT
+       --local-dir kodama-download
+
+   取得した onnx/ の 5 ファイルと tokenizer.json を
+   models/kodama-ja-streaming-small/ に置き、設定画面の「認識エンジン」で
+   kodama を選びます。.onnx.data を忘れると読み込みに失敗します。
+
+2. 起動する
+
+   $LAUNCH
 
    ASR サーバーは必要なときに自分で立ち上がります。別で起動する必要は
    ありません。別の機械でサーバーだけ動かしたい場合は otoa-asr-server
    （または otoa-input --serve）を使ってください。
 
-Linux では貼り付けに xdotool（Wayland では wtype）が要ります。
-入っていないと、認識はできるのに貼り付けだけが失敗します。
+$PLATFORM_NOTE
 
 詳細は README.md、オプションは --help を見てください。
 EOF
@@ -114,13 +151,36 @@ if [ "$OS" = windows ]; then
         POWERSHELL="$(command -v powershell.exe || command -v pwsh.exe || true)"
         [ -n "$POWERSHELL" ] || POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
         [ -x "$POWERSHELL" ] || { echo "zip も PowerShell も使えない" >&2; exit 1; }
+        # **Compress-Archive を使わない。** 区切りをバックスラッシュで書き、
+        # 日本語のファイル名を UTF-8 のフラグ無しで格納するので、
+        # 他の OS で展開すると「はじめに.txt」が化ける（0.1.4 で実際に化けた）。
+        # .NET の ZipFile に UTF-8 を明示すると、区切りも名前も正しくなる。
         "$POWERSHELL" -NoProfile -Command \
-            "Compress-Archive -Path '$NAME' -DestinationPath '$NAME.zip' -Force"
+            "Add-Type -AssemblyName System.IO.Compression.FileSystem; \
+             [System.IO.Compression.ZipFile]::CreateFromDirectory( \
+               (Resolve-Path '$NAME').Path, \
+               (Join-Path (Get-Location).Path '$NAME.zip'), \
+               [System.IO.Compression.CompressionLevel]::Optimal, \
+               \$true, [System.Text.Encoding]::UTF8)"
     fi
     ARCHIVE="$NAME.zip"
 else
     rm -f "$NAME.tar.gz"; tar czf "$NAME.tar.gz" "$NAME"; ARCHIVE="$NAME.tar.gz"
 fi
+# **書庫の中の名前を検査する。** 化けたまま配ると、利用者には
+# 「уБпуБШуВБуБл.txt」のような名前で届く（0.1.4 で実際に起きた）。
+if [ "$OS" = windows ] && command -v unzip >/dev/null; then
+    if unzip -l "$ARCHIVE" | grep -q '\\'; then
+        echo "zip の中でパス区切りがバックスラッシュになっている" >&2
+        exit 1
+    fi
+    if ! unzip -l "$ARCHIVE" | grep -q 'はじめに\.txt'; then
+        echo "zip の中の日本語ファイル名が壊れている" >&2
+        unzip -l "$ARCHIVE" >&2
+        exit 1
+    fi
+fi
+
 ( command -v sha256sum >/dev/null && sha256sum "$ARCHIVE" || shasum -a 256 "$ARCHIVE" ) > "$ARCHIVE.sha256"
 
 echo
