@@ -108,6 +108,20 @@ pub enum ControllerCommand {
     Shutdown,
 }
 
+/// provider の判断を優先し、provider が接続可能と判断した場合に限って
+/// 同梱サーバー由来の問題を表示用 readiness として加える。
+fn combine_readiness(
+    provider_readiness: Readiness,
+    bundled_server_failure: Option<&str>,
+) -> Readiness {
+    match (provider_readiness, bundled_server_failure) {
+        (Readiness::Ready, Some(message)) => Readiness::NeedsSetup {
+            message: message.to_string(),
+        },
+        (readiness, _) => readiness,
+    }
+}
+
 pub struct Controller {
     pub(crate) session: Session,
     pub(crate) transcript: Transcript,
@@ -173,6 +187,9 @@ pub struct Controller {
     pending_settings: Option<Settings>,
     active_api_key: Option<String>,
     provider: Arc<dyn ConnectionProvider>,
+    /// provider とは別に保持する、同梱サーバーの起動失敗。
+    /// provider 自身の readiness が Ready のときだけ表示用に合成する。
+    bundled_server_failure: Option<String>,
     login_cancel: Option<Arc<AtomicBool>>,
     login_result_rx: Option<Receiver<anyhow::Result<()>>>,
     login_thread: Option<thread::JoinHandle<()>>,
@@ -182,6 +199,7 @@ impl Controller {
     pub fn new(
         settings: Settings,
         provider: Arc<dyn ConnectionProvider>,
+        bundled_server_failure: Option<String>,
         to_ui: Sender<UiUpdate>,
         audio_sink: Sender<AudioFrame>,
         vad_control: Sender<VadControl>,
@@ -239,6 +257,7 @@ impl Controller {
             pending_settings: None,
             active_api_key: None,
             provider,
+            bundled_server_failure,
             login_cancel: None,
             login_result_rx: None,
             login_thread: None,
@@ -415,7 +434,7 @@ impl Controller {
     }
 
     fn require_connection(&mut self) {
-        let readiness = self.provider.readiness();
+        let readiness = self.connection_readiness();
         let (kind, message) = match readiness {
             Readiness::NeedsLogin { message } => (OverlayKind::LoginNeeded, message),
             Readiness::NeedsSetup { message } => (OverlayKind::Error, message),
@@ -1241,7 +1260,14 @@ impl Controller {
     }
 
     fn connection_needs_attention(&self) -> bool {
-        !matches!(self.provider.readiness(), Readiness::Ready)
+        !matches!(self.connection_readiness(), Readiness::Ready)
+    }
+
+    fn connection_readiness(&self) -> Readiness {
+        combine_readiness(
+            self.provider.readiness(),
+            self.bundled_server_failure.as_deref(),
+        )
     }
 
     fn refresh_overlay(&mut self) {
@@ -1589,17 +1615,20 @@ fn take_pending(pending: &mut String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_input_gain, failed_retry_is_due, is_nonfatal_asr_error, level_status,
-        next_failed_retry_delay, Controller, LevelStatus, OverlayKind, OverlayView,
+        apply_input_gain, combine_readiness, failed_retry_is_due, is_nonfatal_asr_error,
+        level_status, next_failed_retry_delay, Controller, LevelStatus, OverlayKind, OverlayView,
         FAILED_RETRY_INITIAL, FAILED_RETRY_MAX, GATEWAY_URL_MISSING_MESSAGE,
     };
     use crate::connection::SelfHostedProvider;
     use crate::settings::Settings;
-    use otoa_input_core::{GateEvent, SessionInput, SessionState};
+    use otoa_input_core::{GateEvent, Readiness, SessionInput, SessionState};
     use otoa_input_protocol::{AsrCommand, AsrError, AsrEvent, AsrToken};
     use std::time::{Duration, Instant};
 
-    fn test_controller(settings: Settings) -> Controller {
+    fn test_controller_with_failure(
+        settings: Settings,
+        bundled_server_failure: Option<String>,
+    ) -> Controller {
         let (to_ui, _ui_rx) = crossbeam_channel::bounded(8);
         let (audio_sink, _audio_rx) = crossbeam_channel::bounded(8);
         let (vad_control, _vad_control_rx) = crossbeam_channel::bounded(8);
@@ -1608,12 +1637,57 @@ mod tests {
         Controller::new(
             settings,
             provider,
+            bundled_server_failure,
             to_ui,
             audio_sink,
             vad_control,
             vad_events,
         )
         .expect("controller should initialize for the overlay test")
+    }
+
+    fn test_controller(settings: Settings) -> Controller {
+        test_controller_with_failure(settings, None)
+    }
+
+    #[test]
+    fn bundled_server_failure_becomes_setup_readiness_when_provider_is_ready() {
+        assert_eq!(
+            combine_readiness(Readiness::Ready, Some("モデルが見つかりません")),
+            Readiness::NeedsSetup {
+                message: "モデルが見つかりません".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn provider_readiness_takes_priority_over_bundled_server_failure() {
+        let provider_readiness = Readiness::NeedsLogin {
+            message: "ログインしてください".to_string(),
+        };
+        assert_eq!(
+            combine_readiness(provider_readiness.clone(), Some("ローカルモデルエラー")),
+            provider_readiness
+        );
+    }
+
+    #[test]
+    fn bundled_server_failure_uses_existing_error_overlay_path() {
+        let message = "認識モデル kodama-ja-streaming-small が見つかりません";
+        let mut controller =
+            test_controller_with_failure(Settings::default(), Some(message.to_string()));
+
+        controller.require_connection();
+
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Error,
+                committed: String::new(),
+                partial: String::new(),
+                error: message.to_string(),
+            }
+        );
     }
 
     fn settings_with(update: impl FnOnce(&mut Settings)) -> Settings {
@@ -1730,6 +1804,7 @@ mod tests {
         let mut controller = Controller::new(
             settings,
             provider,
+            None,
             to_ui,
             audio_sink,
             vad_control,
@@ -1756,6 +1831,7 @@ mod tests {
         let mut controller = Controller::new(
             settings,
             provider,
+            None,
             to_ui,
             audio_sink,
             vad_control,

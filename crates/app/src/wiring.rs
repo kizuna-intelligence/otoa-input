@@ -32,6 +32,7 @@ impl Runtime {
 pub fn start(
     settings: Settings,
     provider: std::sync::Arc<dyn otoa_input_core::ConnectionProvider>,
+    bundled_server_failure: Option<String>,
     to_ui: Sender<UiUpdate>,
 ) -> Result<Runtime> {
     let (audio_sink, audio_rx) = crossbeam_channel::bounded::<AudioFrame>(64);
@@ -48,6 +49,7 @@ pub fn start(
             match Controller::new(
                 settings,
                 provider,
+                bundled_server_failure,
                 to_ui,
                 audio_sink,
                 controller_vad_control,

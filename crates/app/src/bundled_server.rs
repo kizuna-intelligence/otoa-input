@@ -14,11 +14,33 @@
 
 use otoa_asr_server::AsrEngine;
 use std::{
+    fmt,
     net::{SocketAddr, TcpStream},
     path::PathBuf,
     sync::mpsc::{self, Receiver, TryRecvError},
     time::Duration,
 };
+
+/// 同梱サーバーを起動できなかった理由。
+///
+/// ログには探索先を含む詳しい情報を残す一方、readiness には限られた表示幅で
+/// 次の行動が分かる短い文だけを渡す。
+pub(crate) struct StartupFailure {
+    log_message: String,
+    readiness_message: String,
+}
+
+impl StartupFailure {
+    pub(crate) fn into_readiness_message(self) -> String {
+        self.readiness_message
+    }
+}
+
+impl fmt::Display for StartupFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.log_message)
+    }
+}
 
 fn model_details(engine: AsrEngine) -> (&'static str, &'static str) {
     match engine {
@@ -79,7 +101,12 @@ fn is_listening(address: SocketAddr) -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
 }
 
-fn startup_error(engine: &str, candidates: &[PathBuf], reason: &str) -> String {
+fn startup_error(
+    engine: &str,
+    candidates: &[PathBuf],
+    reason: &str,
+    readiness_message: String,
+) -> StartupFailure {
     let searched = if candidates.is_empty() {
         "（認識エンジンが未知のため、モデルディレクトリは探索していません）".to_string()
     } else {
@@ -89,26 +116,38 @@ fn startup_error(engine: &str, candidates: &[PathBuf], reason: &str) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    format!(
-        "同梱の ASR サーバーを起動できません: {reason}\n\
-         選択中の認識エンジン: {engine}\n\
-         モデルの探索先:\n{searched}\n\
-         アプリはこのまま起動します。設定画面から reazonspeech または kodama を選べます。"
-    )
+    StartupFailure {
+        log_message: format!(
+            "同梱の ASR サーバーを起動できません: {reason}\n\
+             選択中の認識エンジン: {engine}\n\
+             モデルの探索先:\n{searched}\n\
+             アプリはこのまま起動します。設定画面から reazonspeech または kodama を選べます。"
+        ),
+        readiness_message,
+    }
 }
 
 /// 同梱サーバーを起動する必要があるか調べ、必要なら起動する。
 ///
 /// 起動できなかった理由は戻り値で返す。**起動しないこと自体は失敗ではない。**
 /// 別の機械のサーバーを使う構成なら、これは正常な状態である。
-pub fn start_if_needed(server_url: &str, engine: &str) -> Result<Option<PathBuf>, String> {
+pub(crate) fn start_if_needed(
+    server_url: &str,
+    engine: &str,
+) -> Result<Option<PathBuf>, StartupFailure> {
     let Some(address) = local_address(server_url) else {
         return Ok(None); // 自分の機械ではない
     };
     let engine_name = engine;
-    let engine = engine
-        .parse::<AsrEngine>()
-        .map_err(|error| startup_error(engine_name, &[], &error))?;
+    let engine = engine.parse::<AsrEngine>().map_err(|error| {
+        startup_error(
+            engine_name,
+            &[],
+            &error,
+            "認識エンジンを選べません。設定から reazonspeech または kodama を選んでください。"
+                .to_string(),
+        )
+    })?;
     if is_listening(address) {
         tracing::info!(%address, "ASR サーバーは既に動いているので起動しない");
         return Ok(None);
@@ -117,9 +156,15 @@ pub fn start_if_needed(server_url: &str, engine: &str) -> Result<Option<PathBuf>
     let candidates = model_directories(engine);
     let Some(model_dir) = model_directory(engine, &candidates) else {
         let reason = format!(
-            "認識モデル {directory_name} が見つかりません。README の手順でモデルを取得してください。"
+            "認識モデル {directory_name} が見つかりません。\
+             設定から認識エンジンを選び直すか、README の手順でモデルを置いてください。"
         );
-        return Err(startup_error(engine_name, &candidates, &reason));
+        return Err(startup_error(
+            engine_name,
+            &candidates,
+            &reason,
+            reason.clone(),
+        ));
     };
 
     let port = address.port();
@@ -161,13 +206,23 @@ pub fn start_if_needed(server_url: &str, engine: &str) -> Result<Option<PathBuf>
                 engine_name,
                 &candidates,
                 &format!("ASR サーバーのスレッドを起動できません: {error}"),
+                "同梱の ASR サーバー用スレッドを起動できません。詳しい理由はログを確認してください。"
+                    .to_string(),
             )
         })?;
 
     // **待ち受け開始まで待つ。** モデルの読み込みに数秒かかるので、
     // ここで待たないと最初の接続が必ず失敗する。
     wait_until_listening(address, Duration::from_secs(120), &startup_result_rx)
-        .map_err(|error| startup_error(engine_name, &candidates, &error))?;
+        .map_err(|error| {
+            startup_error(
+                engine_name,
+                &candidates,
+                &error,
+                "同梱の ASR サーバーが待ち受けを開始できません。詳しい理由はログを確認してください。"
+                    .to_string(),
+            )
+        })?;
 
     Ok(Some(model_dir))
 }
@@ -201,8 +256,8 @@ fn wait_until_listening(
 
 #[cfg(test)]
 mod tests {
-    use super::{start_if_needed, wait_until_listening};
-    use std::{net::TcpListener, sync::mpsc, time::Duration};
+    use super::{start_if_needed, startup_error, wait_until_listening};
+    use std::{net::TcpListener, path::PathBuf, sync::mpsc, time::Duration};
 
     #[test]
     fn wait_returns_server_error_without_waiting_for_timeout() {
@@ -228,8 +283,32 @@ mod tests {
         let error = start_if_needed(&format!("ws://{address}/asr/v1"), "misspelled-engine")
             .expect_err("unknown engine should be reported");
 
-        assert!(error.contains("選択中の認識エンジン: misspelled-engine"));
-        assert!(error.contains("モデルディレクトリは探索していません"));
-        assert!(error.contains("設定画面から reazonspeech または kodama を選べます"));
+        let log_message = error.to_string();
+        assert!(log_message.contains("選択中の認識エンジン: misspelled-engine"));
+        assert!(log_message.contains("モデルディレクトリは探索していません"));
+        assert!(log_message.contains("設定画面から reazonspeech または kodama を選べます"));
+        assert_eq!(
+            error.readiness_message,
+            "認識エンジンを選べません。設定から reazonspeech または kodama を選んでください。"
+        );
+    }
+
+    #[test]
+    fn startup_failure_keeps_search_paths_out_of_readiness_message() {
+        let candidates = vec![PathBuf::from(
+            "/very/long/private/path/to/kodama-ja-streaming-small",
+        )];
+        let readiness_message = "認識モデル kodama-ja-streaming-small が見つかりません。設定から認識エンジンを選び直してください。";
+        let error = startup_error(
+            "kodama",
+            &candidates,
+            "model not found",
+            readiness_message.to_string(),
+        );
+
+        assert!(error.to_string().contains(candidates[0].to_str().unwrap()));
+        assert_eq!(error.readiness_message, readiness_message);
+        assert!(!error.readiness_message.contains("/very/long/private/path"));
+        assert!(error.readiness_message.chars().count() <= 80);
     }
 }

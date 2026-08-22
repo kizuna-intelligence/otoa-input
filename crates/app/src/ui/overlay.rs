@@ -232,7 +232,7 @@ fn normal_content(state: UiState) -> impl IntoView {
                 .height(40.0)
                 .text_ellipsis()
         }),
-        label(move || state.overlay_error.get()).style(|style| {
+        label(move || display_error(&state.overlay_error.get())).style(|style| {
             style
                 .width_full()
                 .font_family(theme::font_family().to_string())
@@ -268,6 +268,29 @@ fn display_text(text: &str) -> String {
         chars.insert(LINE_LIMIT, '\n');
     }
     chars.into_iter().collect()
+}
+
+/// エラー文を折り返す。
+///
+/// **転記テキストと違い、大事なのは先頭である**（何が起きたか）。
+/// だから末尾ではなく先頭を残し、`LINE_LIMIT` ごとに折り返す。
+/// 折り返さないと 1 行のまま溢れて、右端で切れて読めなくなる（実際に起きた）。
+fn display_error(text: &str) -> String {
+    const LINE_LIMIT: usize = 34;
+    const MAX_LINES: usize = 3;
+    let chars = text.chars().collect::<Vec<_>>();
+    let limit = LINE_LIMIT * MAX_LINES;
+    let mut lines = Vec::new();
+    for chunk in chars.chunks(LINE_LIMIT).take(MAX_LINES) {
+        lines.push(chunk.iter().collect::<String>());
+    }
+    if chars.len() > limit {
+        if let Some(last) = lines.last_mut() {
+            last.pop();
+            last.push('…');
+        }
+    }
+    lines.join("\n")
 }
 
 /// オーバーレイに出す状態名。色だけでは何が起きているか分からない。
@@ -339,5 +362,26 @@ mod tests {
                 .count(),
             80
         );
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::display_error;
+
+    #[test]
+    fn long_error_wraps_instead_of_overflowing_one_line() {
+        let text = "認識モデル kodama-ja-streaming-small が見つかりません。設定から認識エンジンを選び直すか、README の手順でモデルを置いてください";
+        let displayed = display_error(text);
+        assert!(displayed.contains('\n'), "折り返されていない: {displayed}");
+        for line in displayed.lines() {
+            assert!(line.chars().count() <= 34, "行が長すぎる: {line}");
+        }
+        assert!(displayed.starts_with("認識モデル"), "先頭が残っていない");
+    }
+
+    #[test]
+    fn short_error_is_unchanged() {
+        assert_eq!(display_error("接続できません"), "接続できません");
     }
 }

@@ -1,0 +1,11 @@
+# cargo fmt / clippy / test をクリーンな Rust 環境で回すためのイメージ。
+# 配布物検証用 Dockerfile にはツールチェーンを入れない。
+FROM rust:1.94-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgtk-3-dev libasound2-dev libxcb1-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add rustfmt clippy
+
+WORKDIR /work
+COPY . /work
