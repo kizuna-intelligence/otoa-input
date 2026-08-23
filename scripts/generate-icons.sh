@@ -7,7 +7,14 @@ ICON_DIR="$ROOT_DIR/resources/icons"
 TRAY_DIR="$ICON_DIR/tray"
 
 mkdir -p "$TRAY_DIR"
-python3 "$SCRIPT_DIR/generate-wordmark.py"
+python3 "$SCRIPT_DIR/generate-wordmark.py" \
+  --output "$ICON_DIR/otoa-wordmark.svg"
+python3 "$SCRIPT_DIR/generate-wordmark.py" \
+  --part otoa \
+  --output "$ICON_DIR/otoa-wordmark-otoa.svg"
+python3 "$SCRIPT_DIR/generate-wordmark.py" \
+  --part input \
+  --output "$ICON_DIR/otoa-wordmark-input.svg"
 
 for size in 16 22 24 32 48; do
   rsvg-convert -w "$size" -h "$size" \

@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use url::Url;
 
 const PENDING_AUDIO_LIMIT: usize = 100;
 const CONTROLLER_TICK: Duration = Duration::from_millis(100);
@@ -65,6 +66,7 @@ pub enum UiUpdate {
     Level { peak: i16, status: LevelStatus },
     Account { email: Option<String> },
     LoginState(LoginState),
+    Route { local: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,6 +270,7 @@ impl Controller {
         self.send_ui(UiUpdate::State(self.session.state()));
         self.send_account_update();
         self.send_login_state();
+        self.send_route_update();
         self.send_ui(UiUpdate::Overlay(self.overlay.clone()));
         if self.settings.listening_enabled && !self.connection_needs_attention() {
             self.enable_listening();
@@ -536,6 +539,7 @@ impl Controller {
         let product_settings = settings.product_settings_value();
         self.provider
             .update_settings(&settings.core, product_settings.as_ref());
+        self.send_route_update_for(&settings);
         if matches!(
             self.session.state(),
             SessionState::Disabled | SessionState::Failed
@@ -1223,7 +1227,7 @@ impl Controller {
             kind: OverlayKind::Error,
             committed: String::new(),
             partial: String::new(),
-            error: message,
+            error: format!("{message}\nクリックで再試行"),
         });
     }
 
@@ -1319,6 +1323,25 @@ impl Controller {
 
     fn send_ui(&self, update: UiUpdate) {
         let _ = self.to_ui.try_send(update);
+    }
+
+    fn send_route_update(&self) {
+        self.send_route_update_for(&self.settings);
+    }
+
+    fn send_route_update_for(&self, settings: &Settings) {
+        let Ok(endpoint) = self.provider.endpoint(&settings.core) else {
+            return;
+        };
+        let Ok(url) = Url::parse(&endpoint.url) else {
+            return;
+        };
+        let Some(host) = url.host_str() else {
+            return;
+        };
+        self.send_ui(UiUpdate::Route {
+            local: is_loopback_host(host),
+        });
     }
 
     fn log_session_event(&self, event: &'static str) {
@@ -1612,18 +1635,28 @@ fn take_pending(pending: &mut String) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_input_gain, combine_readiness, failed_retry_is_due, is_nonfatal_asr_error,
-        level_status, next_failed_retry_delay, Controller, LevelStatus, OverlayKind, OverlayView,
-        FAILED_RETRY_INITIAL, FAILED_RETRY_MAX, GATEWAY_URL_MISSING_MESSAGE,
+        apply_input_gain, combine_readiness, failed_retry_is_due, is_loopback_host,
+        is_nonfatal_asr_error, level_status, next_failed_retry_delay, Controller, LevelStatus,
+        OverlayKind, OverlayView, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
+        GATEWAY_URL_MISSING_MESSAGE,
     };
     use crate::connection::SelfHostedProvider;
     use crate::settings::Settings;
     use otoa_input_core::{GateEvent, Readiness, SessionInput, SessionState};
     use otoa_input_protocol::{AsrCommand, AsrError, AsrEvent, AsrToken};
     use std::time::{Duration, Instant};
+    use url::Url;
 
     fn test_controller_with_failure(
         settings: Settings,
@@ -2079,5 +2112,24 @@ mod tests {
 
         assert_eq!(controller.overlay, OverlayView::Hidden);
         assert!(controller.committed_hold_until.is_none());
+    }
+
+    #[test]
+    fn loopback_route_detection_accepts_local_urls() {
+        for url in [
+            "ws://127.0.0.1:8770/asr/v1",
+            "ws://localhost:8770/",
+            "ws://[::1]:8770/",
+        ] {
+            let parsed = Url::parse(url).expect("test URL should parse");
+            assert!(is_loopback_host(parsed.host_str().unwrap()), "{url}");
+        }
+    }
+
+    #[test]
+    fn loopback_route_detection_rejects_remote_urls() {
+        let parsed = Url::parse("wss://otoa-asr-gateway-xxx.a.run.app/ws/asr")
+            .expect("test URL should parse");
+        assert!(!is_loopback_host(parsed.host_str().unwrap()));
     }
 }

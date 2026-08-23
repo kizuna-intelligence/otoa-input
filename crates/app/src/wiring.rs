@@ -124,12 +124,13 @@ pub fn start_preview(
     let preview_thread = thread::Builder::new()
         .name("otoa-preview".to_string())
         .spawn(move || {
-            send_preview_update(&to_ui, scenario);
+            let started = std::time::Instant::now();
+            send_preview_update(&to_ui, scenario, 0.0);
             loop {
                 crossbeam_channel::select! {
                     recv(stop_rx) -> _ => break,
                     default(std::time::Duration::from_millis(100)) => {
-                        send_preview_update(&to_ui, scenario);
+                        send_preview_update(&to_ui, scenario, started.elapsed().as_secs_f64());
                     }
                 }
             }
@@ -146,18 +147,39 @@ pub fn start_preview(
     })
 }
 
-fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario) {
+fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario, elapsed: f64) {
     let view = match scenario {
         PreviewScenario::Splash => OverlayView::Splash,
         PreviewScenario::Settings => OverlayView::Hidden,
-        PreviewScenario::Connecting => preview_overlay(OverlayKind::Connecting),
-        PreviewScenario::Listening => preview_overlay(OverlayKind::Recognizing),
-        PreviewScenario::Finalizing => preview_overlay(OverlayKind::Finalizing),
-        PreviewScenario::Committed => preview_overlay(OverlayKind::Committed),
-        PreviewScenario::Error => preview_overlay(OverlayKind::Error),
-        PreviewScenario::Login => preview_overlay(OverlayKind::LoginNeeded),
+        PreviewScenario::Connecting => preview_overlay(OverlayKind::Connecting, "", "", ""),
+        PreviewScenario::Listening => preview_overlay(
+            OverlayKind::Recognizing,
+            "先日の件ですが、明日までに",
+            "資料をお送りします",
+            "",
+        ),
+        PreviewScenario::Finalizing => preview_overlay(
+            OverlayKind::Finalizing,
+            "先日の件ですが、明日までに資料をお送りします",
+            "",
+            "",
+        ),
+        PreviewScenario::Committed => preview_overlay(
+            OverlayKind::Committed,
+            "先日の件ですが、明日までに資料をお送りします",
+            "",
+            "",
+        ),
+        PreviewScenario::Error => preview_overlay(
+            OverlayKind::Error,
+            "",
+            "",
+            "認識モデル reazonspeech-k2-v2 が見つかりません。設定から認識エンジンを選び直すか、README の手順でモデルを置いてください。",
+        ),
+        PreviewScenario::Login => preview_overlay(OverlayKind::LoginNeeded, "", "", ""),
     };
     let _ = to_ui.send(UiUpdate::Overlay(view));
+    let _ = to_ui.send(UiUpdate::Route { local: true });
     let login_state = if matches!(scenario, PreviewScenario::Login) {
         crate::controller::LoginState::LoggedOut
     } else {
@@ -168,7 +190,8 @@ fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario) {
     let _ = to_ui.send(UiUpdate::LoginState(login_state));
     let _ = to_ui.send(UiUpdate::Level {
         peak: if matches!(scenario, PreviewScenario::Listening) {
-            (0.5 * f64::from(i16::MAX)) as i16
+            let level = 0.425 + 0.175 * (std::f64::consts::TAU * elapsed / 2.0).sin();
+            (level * f64::from(i16::MAX)) as i16
         } else {
             0
         },
@@ -176,12 +199,17 @@ fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario) {
     });
 }
 
-fn preview_overlay(kind: crate::controller::OverlayKind) -> OverlayView {
+fn preview_overlay(
+    kind: crate::controller::OverlayKind,
+    committed: &str,
+    partial: &str,
+    error: &str,
+) -> OverlayView {
     OverlayView::Shown {
         kind,
-        committed: String::new(),
-        partial: String::new(),
-        error: String::new(),
+        committed: committed.to_string(),
+        partial: partial.to_string(),
+        error: error.to_string(),
     }
 }
 

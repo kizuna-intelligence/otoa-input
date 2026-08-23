@@ -12,22 +12,27 @@ from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.ttLib import TTFont
 
 
-def make_wordmark(font_path: Path, output_path: Path, font_size: float = 128.0) -> None:
+def make_wordmark(
+    font_path: Path,
+    output_path: Path,
+    text: str = "Otoa Input",
+    font_size: float = 128.0,
+    part: str = "all",
+) -> None:
     font = TTFont(str(font_path))
     glyph_set = font.getGlyphSet()
     cmap = font.getBestCmap()
     units_per_em = font["head"].unitsPerEm
     scale = font_size / units_per_em
 
-    text = "Otoa Input"
     x = 0.0
-    paths: list[tuple[str, str, float]] = []
+    paths: list[tuple[int, str, str, float]] = []
     min_x = float("inf")
     min_y = float("inf")
     max_x = float("-inf")
     max_y = float("-inf")
 
-    for character in text:
+    for index, character in enumerate(text):
         glyph_name = cmap.get(ord(character))
         if glyph_name is None:
             raise ValueError(f"font has no glyph for {character!r}")
@@ -35,7 +40,7 @@ def make_wordmark(font_path: Path, output_path: Path, font_size: float = 128.0) 
         pen = SVGPathPen(glyph_set)
         glyph.draw(pen)
         if pen.getCommands():
-            paths.append((character, pen.getCommands(), x))
+            paths.append((index, character, pen.getCommands(), x))
 
             bounds_pen = BoundsPen(glyph_set)
             glyph.draw(bounds_pen)
@@ -55,11 +60,18 @@ def make_wordmark(font_path: Path, output_path: Path, font_size: float = 128.0) 
     width = (max_x - min_x) * scale
     height = (max_y - min_y) * scale
     x_offset = -min_x
-    baseline = -min_y
+    # SVG の y 軸は下向きなので、フォントの上端を viewBox の y=0 に合わせる。
+    # `-min_y` ではなく max_y を使わないと、パスが viewBox の上へはみ出して切れる。
+    baseline = max_y
 
     path_elements: list[str] = []
-    for character, commands, glyph_x in paths:
-        fill = "#0d1f3c" if character in "Otoa " else "#1c5cbb"
+    for index, character, commands, glyph_x in paths:
+        include = part == "all" or (part == "otoa" and index < len("Otoa ")) or (
+            part == "input" and index >= len("Otoa ")
+        )
+        if not include:
+            continue
+        fill = "#0d1f3c" if index < len("Otoa ") else "#1c5cbb"
         path_elements.append(
             f'<path fill="{fill}" d="{html.escape(commands, quote=True)}" '
             f'transform="translate({(glyph_x + x_offset) * scale:.4f} '
@@ -88,9 +100,11 @@ def main() -> None:
     parser.add_argument(
         "--output", type=Path, default=Path("resources/icons/otoa-wordmark.svg")
     )
+    parser.add_argument("--text", default="Otoa Input")
+    parser.add_argument("--part", choices=("all", "otoa", "input"), default="all")
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    make_wordmark(args.font, args.output)
+    make_wordmark(args.font, args.output, args.text, part=args.part)
 
 
 if __name__ == "__main__":

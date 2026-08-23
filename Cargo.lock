@@ -3089,6 +3089,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "url",
 ]
 
 [[package]]

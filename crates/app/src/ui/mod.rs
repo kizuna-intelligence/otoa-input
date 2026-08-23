@@ -10,16 +10,15 @@ use crate::wiring::Runtime;
 use crossbeam_channel::{Receiver, Sender};
 use floem::{
     ext_event::create_signal_from_channel,
-    new_window,
-    peniko::kurbo::Point,
-    quit_app,
+    new_window, quit_app,
     reactive::{create_effect, RwSignal, SignalGet, SignalUpdate},
     window::{WindowConfig, WindowLevel},
     AppEvent, Application,
 };
+use otoa_input_core::OverlayTransparency;
 #[cfg(target_os = "linux")]
 use otoa_input_platform::apply_overlay_hints;
-use otoa_input_platform::primary_screen_size;
+use otoa_input_platform::{compositor_available, primary_screen_size};
 #[cfg(target_os = "linux")]
 use std::{thread, time::Duration};
 #[cfg(target_os = "linux")]
@@ -33,6 +32,7 @@ pub struct UiState {
     pub(crate) overlay_error: RwSignal<String>,
     pub(crate) level: RwSignal<f64>,
     pub(crate) level_status: RwSignal<LevelStatus>,
+    pub(crate) route_local: RwSignal<Option<bool>>,
     pub(crate) account_email: RwSignal<String>,
     pub(crate) login_state: RwSignal<LoginState>,
     pub(crate) settings: RwSignal<Settings>,
@@ -52,13 +52,19 @@ pub fn run(
     runtime: Runtime,
 ) -> anyhow::Result<()> {
     let open_settings_on_start = runtime.is_settings_preview();
+    let overlay_transparent = resolve_overlay_transparency(&settings);
     let state = UiState {
-        overlay_mode: RwSignal::new(OverlayMode::Splash),
+        overlay_mode: RwSignal::new(if open_settings_on_start {
+            OverlayMode::Hidden
+        } else {
+            OverlayMode::Splash
+        }),
         overlay_committed: RwSignal::new(String::new()),
         overlay_partial: RwSignal::new(String::new()),
         overlay_error: RwSignal::new(String::new()),
         level: RwSignal::new(0.0),
         level_status: RwSignal::new(LevelStatus::Normal),
+        route_local: RwSignal::new(None),
         account_email: RwSignal::new(String::new()),
         login_state: RwSignal::new(LoginState::LoggedOut),
         settings: RwSignal::new(settings.clone()),
@@ -102,8 +108,15 @@ pub fn run(
     schedule_overlay_hints();
     let window_state = state;
     let app = app.window(
-        move |window_id| overlay::view(window_state, overlay_commands.clone(), window_id),
-        Some(overlay_window_config()),
+        move |window_id| {
+            overlay::view(
+                window_state,
+                overlay_commands.clone(),
+                window_id,
+                overlay_transparent,
+            )
+        },
+        Some(overlay_window_config(&settings, overlay_transparent)),
     );
     if open_settings_on_start {
         open_settings_window(state, runtime.commands.clone());
@@ -148,6 +161,7 @@ fn apply_ui_update(state: UiState, update: UiUpdate, _tray_updates: &Sender<tray
                 .set((f64::from(peak.unsigned_abs()) / f64::from(i16::MAX)).clamp(0.0, 1.0));
             state.level_status.set(status);
         }
+        UiUpdate::Route { local } => state.route_local.set(Some(local)),
         UiUpdate::Account { email } => state.account_email.set(email.unwrap_or_default()),
         UiUpdate::LoginState(login_state) => {
             state.login_state.set(login_state.clone());
@@ -192,25 +206,33 @@ fn apply_overlay_update(state: UiState, view: OverlayView) {
     }
 }
 
-fn overlay_window_config() -> WindowConfig {
-    let mut config = WindowConfig::default().size(overlay::SPLASH_SIZE);
-    if let Some((sw, sh)) = primary_screen_size() {
-        config = config.position(Point::new(
-            (sw - overlay::SPLASH_SIZE.width) / 2.0,
-            (sh - overlay::SPLASH_SIZE.height) / 2.0,
-        ));
-        tracing::debug!(
-            "overlay initial bounds x={} y={} w=360 h=200 source=primary_screen",
-            (sw - overlay::SPLASH_SIZE.width) / 2.0,
-            (sh - overlay::SPLASH_SIZE.height) / 2.0,
-        );
-    }
-    config
+fn resolve_overlay_transparency(settings: &Settings) -> bool {
+    let compositor = compositor_available();
+    let requested = settings.overlay_transparency();
+    let transparent = match requested {
+        OverlayTransparency::On => true,
+        OverlayTransparency::Off => false,
+        OverlayTransparency::Auto => compositor,
+    };
+    tracing::info!(
+        requested = ?requested,
+        compositor_available = compositor,
+        transparent,
+        "overlay transparency resolved at startup"
+    );
+    transparent
+}
+
+fn overlay_window_config(settings: &Settings, transparent: bool) -> WindowConfig {
+    tracing::debug!(position = ?settings.overlay_position(), transparent, "overlay initial window config");
+    WindowConfig::default()
+        .size(overlay::initial_window_size(transparent))
         .title("Otoa Input")
         .undecorated(true)
         .show_titlebar(false)
         .resizable(false)
-        .with_transparent(false)
+        .with_transparent(transparent)
+        .undecorated_shadow(false)
         .window_level(WindowLevel::AlwaysOnTop)
         .apply_default_theme(false)
 }

@@ -1,9 +1,18 @@
 use floem::peniko::{Brush, Color, Gradient};
 use floem::text::Weight;
 
+#[allow(dead_code)]
 pub const LOGO_PNG: &[u8] = include_bytes!("../../../../resources/icons/otoa-input-192.png");
+#[allow(dead_code)]
+pub const APP_ICON_SVG: &str = include_str!("../../../../resources/icons/otoa-input.svg");
+#[allow(dead_code)]
 pub const MARK_SVG: &str = include_str!("../../../../resources/icons/otoa-mark.svg");
+#[allow(dead_code)]
 pub const WORDMARK_SVG: &str = include_str!("../../../../resources/icons/otoa-wordmark.svg");
+pub const WORDMARK_OTOA_SVG: &str =
+    include_str!("../../../../resources/icons/otoa-wordmark-otoa.svg");
+pub const WORDMARK_INPUT_SVG: &str =
+    include_str!("../../../../resources/icons/otoa-wordmark-input.svg");
 
 #[allow(dead_code)]
 pub mod color {
@@ -64,6 +73,7 @@ pub mod text {
     pub const MICRO_WEIGHT: Weight = Weight::BLACK;
 }
 
+#[allow(dead_code)]
 pub mod space {
     pub const XS: f64 = 4.0;
     pub const SM: f64 = 8.0;
@@ -73,6 +83,7 @@ pub mod space {
     pub const XXL: f64 = 32.0;
 }
 
+#[allow(dead_code)]
 pub mod radius {
     pub const SM: f64 = 10.0;
     pub const BAR: f64 = 16.0;
@@ -90,6 +101,7 @@ pub struct Shadow {
     pub color: Color,
 }
 
+#[allow(dead_code)]
 pub mod shadow {
     use super::{Color, Shadow};
 
@@ -116,6 +128,7 @@ pub mod shadow {
     };
 }
 
+#[allow(dead_code)]
 pub mod motion {
     pub const RING_PULSE: f64 = 2.6;
     pub const EQ_IDLE: f64 = 1.15;

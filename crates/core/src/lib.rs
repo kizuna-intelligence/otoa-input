@@ -9,5 +9,5 @@ pub use connection::{Account, ConnectionProvider, Endpoint, PrepareAction, Readi
 pub use gate::{GateEvent, SpeechGate};
 pub use preroll::PreRoll;
 pub use session::{Session, SessionInput, SessionState};
-pub use settings::Settings;
+pub use settings::{OverlayPosition, OverlayTransparency, Settings};
 pub use transcript::Transcript;
