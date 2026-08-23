@@ -70,6 +70,10 @@ WAV で書き出す。「先頭が欠ける」ような不具合で、欠けて�
 ごとに実装が違い、外部コマンド（Linux の `xdotool` / `wtype`）や権限
 （macOS のアクセシビリティ）に依存するので、そこだけ切り離して確認できる。
 
+UI の検証はホストで起動せず、`bash test-e2e/ui-preview.sh <state...>` で Docker から実行する。
+設定面は `settings:general` など、透過を含めるときは `--compositor` を付ける。
+出力先は `--out DIR` で指定し、`summary.txt` と PNG を確認する。
+
 ## プラットフォーム差
 
 - **トレイのログイン状態は Linux でしか更新されない。** Linux は自前の
