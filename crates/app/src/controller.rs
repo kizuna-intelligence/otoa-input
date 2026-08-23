@@ -841,10 +841,27 @@ impl Controller {
                 self.log_session_event("Connected");
             }
             AsrEvent::FinalText(tokens) => {
+                // finalize と同じ応答に含まれる FinalText は現在の発話の
+                // 確定結果なので受け取る。FinalizeDone 後、次の発話前に届く
+                // 遅れた結果は次の区切りへ混ざるため捨てる。
+                if self.client_finalize_sent && !self.gate.is_speaking() && !self.finalize_pending {
+                    tracing::debug!(
+                        target: "otoa_input",
+                        "ignored final text after client finalize until next speech"
+                    );
+                    return;
+                }
                 self.transcript.push_final(&tokens_to_text(&tokens));
                 self.send_text_update(true);
             }
             AsrEvent::PartialText(tokens) => {
+                if self.client_finalize_sent && !self.gate.is_speaking() {
+                    tracing::debug!(
+                        target: "otoa_input",
+                        "ignored partial text after client finalize until next speech"
+                    );
+                    return;
+                }
                 let text = tokens_to_text(&tokens);
                 let had_commit_hold = !text.is_empty() && self.clear_commit_hold();
                 self.transcript.replace_partial(&text);
@@ -1729,6 +1746,39 @@ mod tests {
         settings
     }
 
+    fn asr_token(text: &str, is_final: bool) -> AsrToken {
+        AsrToken {
+            text: text.to_string(),
+            start_ms: None,
+            end_ms: None,
+            confidence: None,
+            is_final,
+            speaker: None,
+            language: None,
+            translation_status: None,
+            source_language: None,
+        }
+    }
+
+    fn streaming_controller(
+        settings: Settings,
+    ) -> (Controller, crossbeam_channel::Receiver<AsrCommand>) {
+        let mut controller = test_controller(settings);
+        let (to_asr, asr_commands) = crossbeam_channel::unbounded();
+        controller.to_asr = Some(to_asr);
+        assert!(controller.session.apply(SessionInput::Enable));
+        assert!(controller.session.apply(SessionInput::SpeechStarted));
+        assert!(controller.session.apply(SessionInput::Connected));
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        (controller, asr_commands)
+    }
+
+    fn end_speech(controller: &mut Controller) {
+        assert_eq!(controller.gate.push(0.0), Some(GateEvent::SpeechEnded));
+        controller.handle_gate_event(GateEvent::SpeechEnded);
+    }
+
     fn committed_overlay(controller: &Controller) -> (&str, &str) {
         let OverlayView::Shown {
             kind,
@@ -2080,6 +2130,96 @@ mod tests {
 
         controller.handle_asr_event(AsrEvent::FinalizeDone);
         assert!(!controller.finalize_pending);
+    }
+
+    #[test]
+    fn partial_after_finalize_is_ignored_until_next_speech() {
+        let settings = settings_with(|settings| {
+            settings.auto_paste = false;
+            settings.commit_hold_ms = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+        end_speech(&mut controller);
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+
+        controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("確定", true)]));
+        controller.handle_asr_event(AsrEvent::FinalizeDone);
+
+        assert!(controller.transcript.is_empty());
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+        assert_eq!(
+            controller
+                .last_commit
+                .as_ref()
+                .map(|(text, _)| text.as_str()),
+            Some("確定")
+        );
+
+        controller.handle_asr_event(AsrEvent::PartialText(vec![asr_token("あ", false)]));
+        assert!(controller.transcript.is_empty());
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+
+        controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("遅延", true)]));
+        assert!(controller.transcript.is_empty());
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+    }
+
+    #[test]
+    fn partial_after_next_speech_started_is_shown() {
+        let settings = settings_with(|settings| {
+            settings.auto_paste = false;
+            settings.commit_hold_ms = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+        end_speech(&mut controller);
+        controller.handle_asr_event(AsrEvent::FinalizeDone);
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        controller.handle_asr_event(AsrEvent::PartialText(vec![asr_token("次の", false)]));
+
+        assert_eq!(controller.transcript.partial(), "次の");
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Recognizing,
+                committed: String::new(),
+                partial: "次の".to_string(),
+                error: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn server_endpoint_mode_keeps_showing_partials() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.auto_paste = false;
+            settings.commit_hold_ms = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+        end_speech(&mut controller);
+
+        assert!(!controller.client_finalize_sent);
+        controller.handle_asr_event(AsrEvent::PartialText(vec![asr_token("サーバー", false)]));
+
+        assert_eq!(controller.transcript.partial(), "サーバー");
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Recognizing,
+                committed: String::new(),
+                partial: "サーバー".to_string(),
+                error: String::new(),
+            }
+        );
     }
 
     #[test]
