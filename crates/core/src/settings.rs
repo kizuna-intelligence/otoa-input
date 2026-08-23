@@ -74,7 +74,7 @@ pub struct Settings {
     pub commit_hold_ms: u32,
     /// スプラッシュを表示する時間（ミリ秒）。
     pub splash_ms: u32,
-    /// 入力バーの位置。`bottom`（既定）、`top`、`center`。
+    /// 入力バーの位置。`center`（既定）、`bottom`、`top`。
     pub overlay_position: String,
     /// 入力バーの透過。`auto`（既定）、`on`、`off`。
     pub overlay_transparent: String,
@@ -136,7 +136,7 @@ impl Default for Settings {
             paste_per_endpoint: true,
             commit_hold_ms: 900,
             splash_ms: 2500,
-            overlay_position: "bottom".to_string(),
+            overlay_position: "center".to_string(),
             overlay_transparent: "auto".to_string(),
             reduce_motion: false,
         }
@@ -158,7 +158,7 @@ impl Settings {
         match self.overlay_position.as_str() {
             "top" => OverlayPosition::Top,
             "center" => OverlayPosition::Center,
-            _ => OverlayPosition::Bottom,
+            _ => OverlayPosition::Center,
         }
     }
 
@@ -190,7 +190,7 @@ mod tests {
         assert!(settings.paste_per_endpoint);
         assert_eq!(settings.commit_hold_ms, 900);
         assert_eq!(settings.splash_ms, 2500);
-        assert_eq!(settings.overlay_position, "bottom");
+        assert_eq!(settings.overlay_position, "center");
         assert_eq!(settings.overlay_transparent, "auto");
         assert!(!settings.reduce_motion);
     }
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(settings.auto_paste, Settings::default().auto_paste);
         assert_eq!(settings.commit_hold_ms, 900);
         assert_eq!(settings.splash_ms, 2500);
-        assert_eq!(settings.overlay_position, "bottom");
+        assert_eq!(settings.overlay_position, "center");
         assert_eq!(settings.overlay_transparent, "auto");
         assert!(!settings.reduce_motion);
     }
@@ -270,7 +270,7 @@ mod tests {
             r#"{"overlay_position":"diagonal","overlay_transparent":"sometimes"}"#,
         )
         .expect("unknown overlay values should deserialize");
-        assert_eq!(settings.overlay_position(), super::OverlayPosition::Bottom);
+        assert_eq!(settings.overlay_position(), super::OverlayPosition::Center);
         assert_eq!(
             settings.overlay_transparency(),
             super::OverlayTransparency::Auto

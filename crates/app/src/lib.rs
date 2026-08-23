@@ -73,7 +73,9 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
   --preview-overlay=<状態>
                       音声・接続なしで入力バーを表示する。
                       splash/connecting/listening/finalizing/committed/error/login
-  --preview-settings  音声・接続なしで設定画面を表示する
+  --preview-settings[=<面>]
+                      音声・接続なしで設定画面を表示する。
+                      general/mic/asr/advanced/account/about
   -h, --help          この使い方を表示する
 
 設定はトレイアイコンの「設定」から変更する。設定ファイルの場所は
@@ -146,14 +148,25 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         return ui::run(settings, ui_updates, runtime);
     }
 
-    if arguments
+    if let Some(argument) = arguments
         .iter()
-        .any(|argument| argument == "--preview-settings")
+        .find(|argument| argument.starts_with("--preview-settings"))
     {
+        let page_name = argument
+            .strip_prefix("--preview-settings=")
+            .unwrap_or("general");
+        let page = wiring::SettingsPage::parse(page_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "未知の設定プレビュー面です: {page_name}（general/mic/asr/advanced/account/about）"
+            )
+        })?;
         let settings = load_settings()?;
         let (to_ui, ui_updates) = unbounded_channel();
-        let runtime =
-            wiring::start_preview(settings.clone(), wiring::PreviewScenario::Settings, to_ui)?;
+        let runtime = wiring::start_preview(
+            settings.clone(),
+            wiring::PreviewScenario::Settings(page),
+            to_ui,
+        )?;
         return ui::run(settings, ui_updates, runtime);
     }
 
@@ -228,11 +241,14 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         Err(error) => tracing::warn!(%error, "failed to list input devices"),
     }
     let (to_ui, ui_updates) = unbounded_channel();
+    let account_settings_available =
+        deps.provider.prepare().is_some() || deps.provider.account().is_some();
     let runtime = wiring::start(
         settings.clone(),
         deps.provider,
         bundled_server_failure,
         to_ui,
+        account_settings_available,
     )?;
     ui::run(settings, ui_updates, runtime)
 }

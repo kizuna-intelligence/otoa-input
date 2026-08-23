@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fuse3 libfuse2t64 \
       openbox dbus-x11 \
       xfce4-panel xfce4-indicator-plugin \
-      imagemagick fonts-noto-cjk tesseract-ocr tesseract-ocr-jpn \
+      imagemagick fonts-noto-cjk fonts-noto-core tesseract-ocr tesseract-ocr-jpn \
       espeak-ng sox python3-websocket \
       x11-xserver-utils x11-utils xcompmgr \
     && rm -rf /var/lib/apt/lists/*

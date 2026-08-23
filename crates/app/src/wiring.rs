@@ -19,7 +19,31 @@ pub enum PreviewScenario {
     Committed,
     Error,
     Login,
-    Settings,
+    Settings(SettingsPage),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsPage {
+    General,
+    Microphone,
+    Recognition,
+    Advanced,
+    Account,
+    About,
+}
+
+impl SettingsPage {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "general" => Some(Self::General),
+            "mic" => Some(Self::Microphone),
+            "asr" => Some(Self::Recognition),
+            "advanced" => Some(Self::Advanced),
+            "account" => Some(Self::Account),
+            "about" => Some(Self::About),
+            _ => None,
+        }
+    }
 }
 
 impl PreviewScenario {
@@ -45,6 +69,8 @@ pub struct Runtime {
     preview_stop: Option<Sender<()>>,
     preview_thread: Option<thread::JoinHandle<()>>,
     preview_settings: bool,
+    preview_settings_page: Option<SettingsPage>,
+    account_settings_available: bool,
 }
 
 impl Runtime {
@@ -70,6 +96,14 @@ impl Runtime {
     pub(crate) fn is_settings_preview(&self) -> bool {
         self.preview_settings
     }
+
+    pub(crate) fn settings_preview_page(&self) -> Option<SettingsPage> {
+        self.preview_settings_page
+    }
+
+    pub(crate) fn account_settings_available(&self) -> bool {
+        self.account_settings_available
+    }
 }
 
 pub fn start(
@@ -77,6 +111,7 @@ pub fn start(
     provider: std::sync::Arc<dyn otoa_input_core::ConnectionProvider>,
     bundled_server_failure: Option<String>,
     to_ui: Sender<UiUpdate>,
+    account_settings_available: bool,
 ) -> Result<Runtime> {
     let (audio_sink, audio_rx) = crossbeam_channel::bounded::<AudioFrame>(64);
     let (vad_event_sink, vad_events) = crossbeam_channel::unbounded::<VadMessage>();
@@ -111,6 +146,8 @@ pub fn start(
         preview_stop: None,
         preview_thread: None,
         preview_settings: false,
+        preview_settings_page: None,
+        account_settings_available,
     })
 }
 
@@ -143,14 +180,22 @@ pub fn start_preview(
         vad_thread: None,
         preview_stop: Some(stop),
         preview_thread: Some(preview_thread),
-        preview_settings: matches!(scenario, PreviewScenario::Settings),
+        preview_settings: matches!(scenario, PreviewScenario::Settings(_)),
+        preview_settings_page: match scenario {
+            PreviewScenario::Settings(page) => Some(page),
+            _ => None,
+        },
+        account_settings_available: matches!(
+            scenario,
+            PreviewScenario::Settings(SettingsPage::Account)
+        ),
     })
 }
 
 fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario, elapsed: f64) {
     let view = match scenario {
         PreviewScenario::Splash => OverlayView::Splash,
-        PreviewScenario::Settings => OverlayView::Hidden,
+        PreviewScenario::Settings(_) => OverlayView::Hidden,
         PreviewScenario::Connecting => preview_overlay(OverlayKind::Connecting, "", "", ""),
         PreviewScenario::Listening => preview_overlay(
             OverlayKind::Recognizing,
@@ -180,7 +225,11 @@ fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario, elap
     };
     let _ = to_ui.send(UiUpdate::Overlay(view));
     let _ = to_ui.send(UiUpdate::Route { local: true });
-    let login_state = if matches!(scenario, PreviewScenario::Login) {
+    let login_state = if matches!(scenario, PreviewScenario::Settings(SettingsPage::Account)) {
+        crate::controller::LoginState::LoggedIn {
+            email: "you@example.com".to_string(),
+        }
+    } else if matches!(scenario, PreviewScenario::Login) {
         crate::controller::LoginState::LoggedOut
     } else {
         crate::controller::LoginState::LoggedIn {
@@ -189,8 +238,11 @@ fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario, elap
     };
     let _ = to_ui.send(UiUpdate::LoginState(login_state));
     let _ = to_ui.send(UiUpdate::Level {
-        peak: if matches!(scenario, PreviewScenario::Listening) {
-            let level = 0.425 + 0.175 * (std::f64::consts::TAU * elapsed / 2.0).sin();
+        peak: if matches!(
+            scenario,
+            PreviewScenario::Listening | PreviewScenario::Settings(_)
+        ) {
+            let level = 0.45 + 0.25 * (std::f64::consts::TAU * elapsed / 2.0).sin();
             (level * f64::from(i16::MAX)) as i16
         } else {
             0

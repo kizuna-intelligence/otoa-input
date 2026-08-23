@@ -6,7 +6,7 @@ pub mod tray;
 use crate::controller::LoginState;
 use crate::controller::{ControllerCommand, LevelStatus, OverlayKind, OverlayView, UiUpdate};
 use crate::settings::Settings;
-use crate::wiring::Runtime;
+use crate::wiring::{Runtime, SettingsPage};
 use crossbeam_channel::{Receiver, Sender};
 use floem::{
     ext_event::create_signal_from_channel,
@@ -18,7 +18,7 @@ use floem::{
 use otoa_input_core::OverlayTransparency;
 #[cfg(target_os = "linux")]
 use otoa_input_platform::apply_overlay_hints;
-use otoa_input_platform::{compositor_available, primary_screen_size};
+use otoa_input_platform::compositor_available;
 #[cfg(target_os = "linux")]
 use std::{thread, time::Duration};
 #[cfg(target_os = "linux")]
@@ -37,6 +37,7 @@ pub struct UiState {
     pub(crate) login_state: RwSignal<LoginState>,
     pub(crate) settings: RwSignal<Settings>,
     pub(crate) settings_window_open: RwSignal<bool>,
+    pub(crate) account_settings_available: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -52,6 +53,10 @@ pub fn run(
     runtime: Runtime,
 ) -> anyhow::Result<()> {
     let open_settings_on_start = runtime.is_settings_preview();
+    let settings_preview_page = runtime
+        .settings_preview_page()
+        .unwrap_or(SettingsPage::General);
+    let account_settings_available = runtime.account_settings_available();
     let overlay_transparent = resolve_overlay_transparency(&settings);
     let state = UiState {
         overlay_mode: RwSignal::new(if open_settings_on_start {
@@ -69,6 +74,7 @@ pub fn run(
         login_state: RwSignal::new(LoginState::LoggedOut),
         settings: RwSignal::new(settings.clone()),
         settings_window_open: RwSignal::new(false),
+        account_settings_available,
     };
     let ui_signal = create_signal_from_channel(ui_updates);
     let (tray_actions, tray_events) = crossbeam_channel::unbounded();
@@ -91,7 +97,7 @@ pub fn run(
         };
         match action {
             tray::TrayAction::OpenSettings => {
-                open_settings_window(state, settings_commands.clone());
+                open_settings_window(state, settings_commands.clone(), SettingsPage::General);
             }
             tray::TrayAction::Quit => quit_app(),
         }
@@ -119,7 +125,7 @@ pub fn run(
         Some(overlay_window_config(&settings, overlay_transparent)),
     );
     if open_settings_on_start {
-        open_settings_window(state, runtime.commands.clone());
+        open_settings_window(state, runtime.commands.clone(), settings_preview_page);
     }
     app.run();
 
@@ -127,26 +133,25 @@ pub fn run(
     Ok(())
 }
 
-pub(crate) fn open_settings_window(state: UiState, commands: Sender<ControllerCommand>) {
+pub(crate) fn open_settings_window(
+    state: UiState,
+    commands: Sender<ControllerCommand>,
+    initial_page: SettingsPage,
+) {
     if state.settings_window_open.get_untracked() {
         return;
     }
     state.settings_window_open.set(true);
     let settings = state.settings.get_untracked();
     new_window(
-        move |window_id| settings_view::view(settings, state, commands, window_id),
+        move |window_id| settings_view::view(settings, state, commands, window_id, initial_page),
         Some(
             WindowConfig::default()
-                .size((560.0, settings_window_initial_height()))
-                .title("Otoa Input 設定"),
+                .size((720.0, 600.0))
+                .title("Otoa Input の設定")
+                .resizable(true),
         ),
     );
-}
-
-fn settings_window_initial_height() -> f64 {
-    primary_screen_size()
-        .map(|(_, height)| (height * 0.9).min(720.0))
-        .unwrap_or(720.0)
 }
 
 fn apply_ui_update(state: UiState, update: UiUpdate, _tray_updates: &Sender<tray::TrayUpdate>) {

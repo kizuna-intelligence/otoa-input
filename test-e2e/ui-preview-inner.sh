@@ -57,7 +57,7 @@ xsetroot -solid '#6b7a90'
 
 COMPOSITOR=0
 if [ "${UI_COMPOSITOR:-}" = "1" ]; then
-    xcompmgr -c > /tmp/xcompmgr.log 2>&1 &
+    xcompmgr > /tmp/xcompmgr.log 2>&1 &
     COMPOSITOR=1
     COMPOSITOR_PID=$!
     CLEANUP_PIDS+=("$COMPOSITOR_PID")
@@ -175,6 +175,7 @@ run_state() {
         return 1
     fi
 
+    xdotool mousemove 0 0
     local geometry
     geometry=$(crop_window "$window_id" "/out/$safe_state.png")
     local cpu

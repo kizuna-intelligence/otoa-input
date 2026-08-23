@@ -307,7 +307,13 @@ fn apply_overlay_window(window_id: &WindowId, shape: OverlayWindowShape) {
                 debug!(?position, "Wayland compositor chooses the overlay position");
                 return;
             }
-            if let Some((x, y, width, height)) = screen_bounds(window_id) {
+            let bounds = match position {
+                OverlayPosition::Center => primary_screen_size()
+                    .map(|(width, height)| (0.0, 0.0, width, height))
+                    .or_else(|| screen_bounds(window_id)),
+                OverlayPosition::Bottom | OverlayPosition::Top => screen_bounds(window_id),
+            };
+            if let Some((x, y, width, height)) = bounds {
                 let (window_x, window_y) = match position {
                     OverlayPosition::Bottom => (
                         x + (width - size.width) / 2.0,
