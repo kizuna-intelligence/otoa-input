@@ -25,20 +25,25 @@ use std::{thread, time::Duration};
 use tracing::warn;
 
 #[derive(Clone, Copy)]
+/// 画面が読む状態。
+///
+/// 設定画面を自分で描く配布（[`crate::Deps::settings_view`]）がここを読むので、
+/// 中身は公開してある。書き換えてよいのは `settings` と
+/// `settings_window_open` だけで、残りは本体が更新する。
 pub struct UiState {
-    pub(crate) overlay_mode: RwSignal<OverlayMode>,
-    pub(crate) overlay_committed: RwSignal<String>,
-    pub(crate) overlay_partial: RwSignal<String>,
-    pub(crate) overlay_error: RwSignal<String>,
-    pub(crate) session_state: RwSignal<SessionState>,
-    pub(crate) level: RwSignal<f64>,
-    pub(crate) level_status: RwSignal<LevelStatus>,
-    pub(crate) route_local: RwSignal<Option<bool>>,
-    pub(crate) account_email: RwSignal<String>,
-    pub(crate) login_state: RwSignal<LoginState>,
-    pub(crate) settings: RwSignal<Settings>,
-    pub(crate) settings_window_open: RwSignal<bool>,
-    pub(crate) account_settings_available: bool,
+    pub overlay_mode: RwSignal<OverlayMode>,
+    pub overlay_committed: RwSignal<String>,
+    pub overlay_partial: RwSignal<String>,
+    pub overlay_error: RwSignal<String>,
+    pub session_state: RwSignal<SessionState>,
+    pub level: RwSignal<f64>,
+    pub level_status: RwSignal<LevelStatus>,
+    pub route_local: RwSignal<Option<bool>>,
+    pub account_email: RwSignal<String>,
+    pub login_state: RwSignal<LoginState>,
+    pub settings: RwSignal<Settings>,
+    pub settings_window_open: RwSignal<bool>,
+    pub account_settings_available: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -52,6 +57,7 @@ pub fn run(
     settings: Settings,
     ui_updates: Receiver<UiUpdate>,
     runtime: Runtime,
+    settings_view_override: Option<crate::SettingsView>,
 ) -> anyhow::Result<()> {
     let open_settings_on_start = runtime.is_settings_preview();
     let settings_preview_page = runtime
@@ -98,13 +104,19 @@ pub fn run(
 
     let tray_signal = create_signal_from_channel(tray_events);
     let settings_commands = runtime.commands.clone();
+    let settings_view_for_tray = settings_view_override.clone();
     create_effect(move |_| {
         let Some(action) = tray_signal.get() else {
             return;
         };
         match action {
             tray::TrayAction::OpenSettings => {
-                open_settings_window(state, settings_commands.clone(), SettingsPage::General);
+                open_settings_window(
+                    state,
+                    settings_commands.clone(),
+                    SettingsPage::General,
+                    settings_view_for_tray.clone(),
+                );
             }
             tray::TrayAction::Quit => quit_app(),
         }
@@ -132,7 +144,12 @@ pub fn run(
         Some(overlay_window_config(&settings, overlay_transparent)),
     );
     if open_settings_on_start {
-        open_settings_window(state, runtime.commands.clone(), settings_preview_page);
+        open_settings_window(
+            state,
+            runtime.commands.clone(),
+            settings_preview_page,
+            settings_view_override.clone(),
+        );
     }
     app.run();
 
@@ -144,6 +161,7 @@ pub(crate) fn open_settings_window(
     state: UiState,
     commands: Sender<ControllerCommand>,
     initial_page: SettingsPage,
+    settings_view_override: Option<crate::SettingsView>,
 ) {
     if state.settings_window_open.get_untracked() {
         return;
@@ -151,7 +169,18 @@ pub(crate) fn open_settings_window(
     state.settings_window_open.set(true);
     let settings = state.settings.get_untracked();
     new_window(
-        move |window_id| settings_view::view(settings, state, commands, window_id, initial_page),
+        move |window_id| match settings_view_override {
+            // 差し替えがあればそちらへ。公開版の画面は settings_view::view
+            // として公開してあるので、差し替え側がそれを土台に使える。
+            Some(build) => build(settings, state, commands, window_id),
+            None => floem::IntoView::into_any(settings_view::view(
+                settings,
+                state,
+                commands,
+                window_id,
+                initial_page,
+            )),
+        },
         Some(
             WindowConfig::default()
                 .size((720.0, 600.0))

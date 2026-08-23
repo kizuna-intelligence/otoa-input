@@ -9,11 +9,12 @@
 //! use std::sync::Arc;
 //! # fn main() -> anyhow::Result<()> {
 //! let provider = Arc::new(otoa_input_app::SelfHostedProvider);
-//! otoa_input_app::run(otoa_input_app::Deps { provider })
+//! otoa_input_app::run(otoa_input_app::Deps::new(provider))
 //! # }
 //! ```
 
-use crossbeam_channel::unbounded as unbounded_channel;
+use crossbeam_channel::{unbounded as unbounded_channel, Sender};
+use floem::window::WindowId;
 use otoa_input_core::ConnectionProvider;
 use otoa_input_platform::{PasteMethod, TextOutput};
 use std::{collections::HashMap, sync::Arc};
@@ -24,23 +25,52 @@ mod connection;
 mod controller;
 mod settings;
 mod settings_io;
-mod ui;
+pub mod ui;
 mod wiring;
 
 pub use connection::SelfHostedProvider;
+pub use controller::{ControllerCommand, LevelStatus, LoginState};
 pub use settings::Settings;
+
+/// 設定画面を差し替える。
+///
+/// 受け取るものは公開版の設定画面と同じで、返すのは画面そのものである。
+/// 公開版の [`ui::settings_view::view`] を自分で呼べるので、
+/// **公開版の画面を土台にして自分の欄を足す**形が取れる。
+pub type SettingsView = Arc<
+    dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>, WindowId) -> floem::AnyView
+        + Send
+        + Sync,
+>;
+// 公開版の画面が受け取る初期ページは差し替え側に渡していない。
+// 差し替えた画面が自分の面構成を持つ以上、公開版のページ指定は意味を持たない。
 
 /// [`run`] に差し込むもの。
 ///
-/// **拡張点はここ 1 つだけにしてある。** 増やすたびに、公開側が永久に
-/// 維持しなければならない API が増える。接続先ごとの設定は
-/// [`Settings::product`] を通して各実装が自分で解釈する。
+/// **拡張点を増やすときは、それが永久に維持する API になることを承知で増やす。**
+/// 接続先ごとの設定は [`Settings::product`] を通して各実装が自分で解釈する。
 pub struct Deps {
     /// 接続先の解決、認証、アカウント表示を担う。
     ///
     /// [`ConnectionProvider::prepare`] が `None` を返す実装では、
     /// ログイン関係の UI（トレイの項目、設定画面のアカウント欄）は出ない。
     pub provider: Arc<dyn ConnectionProvider>,
+    /// 設定画面。`None` なら公開版のものを使う。
+    ///
+    /// 設定画面に欄を 1 つ足すためだけに個別の差し込み口を並べると、
+    /// 欄の種類ごとに口が増えていく。画面ごと渡せるようにして、
+    /// 足すものは各実装が自分で決める。
+    pub settings_view: Option<SettingsView>,
+}
+
+impl Deps {
+    /// 接続先だけを差し替える。設定画面は公開版のものを使う。
+    pub fn new(provider: Arc<dyn ConnectionProvider>) -> Self {
+        Self {
+            provider,
+            settings_view: None,
+        }
+    }
 }
 
 /// 設定ファイルを読む。[`Deps`] を組み立てるために先に必要になる。
@@ -52,9 +82,7 @@ pub fn load_settings() -> anyhow::Result<Settings> {
 pub fn run_self_hosted() -> anyhow::Result<()> {
     // **設定を読む前に呼ぶ。** 他の配布と設定ファイルを共有しないため。
     otoa_input_platform::set_app_directory("otoa-input-oss");
-    run(Deps {
-        provider: Arc::new(SelfHostedProvider),
-    })
+    run(Deps::new(Arc::new(SelfHostedProvider)))
 }
 
 /// `--help` の本文。オプションを増やしたらここも足す。
@@ -186,7 +214,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         let settings = load_settings()?;
         let (to_ui, ui_updates) = unbounded_channel();
         let runtime = wiring::start_preview(settings.clone(), scenario, to_ui)?;
-        return ui::run(settings, ui_updates, runtime);
+        return ui::run(settings, ui_updates, runtime, deps.settings_view);
     }
 
     if let Some(argument) = arguments
@@ -208,7 +236,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             wiring::PreviewScenario::Settings(page),
             to_ui,
         )?;
-        return ui::run(settings, ui_updates, runtime);
+        return ui::run(settings, ui_updates, runtime, deps.settings_view);
     }
 
     if let Some(index) = arguments
@@ -291,7 +319,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         to_ui,
         account_settings_available,
     )?;
-    ui::run(settings, ui_updates, runtime)
+    ui::run(settings, ui_updates, runtime, deps.settings_view)
 }
 
 #[cfg(test)]
