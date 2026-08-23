@@ -1,5 +1,6 @@
 use crate::controller::{
-    Controller, ControllerCommand, UiUpdate, VadControl, VadFrame, VadMessage,
+    Controller, ControllerCommand, OverlayKind, OverlayView, UiUpdate, VadControl, VadFrame,
+    VadMessage,
 };
 use crate::settings::Settings;
 use anyhow::Result;
@@ -9,11 +10,41 @@ use otoa_input_vad::SileroVad;
 use std::path::PathBuf;
 use std::thread;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewScenario {
+    Splash,
+    Connecting,
+    Listening,
+    Finalizing,
+    Committed,
+    Error,
+    Login,
+    Settings,
+}
+
+impl PreviewScenario {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "splash" => Some(Self::Splash),
+            "connecting" => Some(Self::Connecting),
+            "listening" => Some(Self::Listening),
+            "finalizing" => Some(Self::Finalizing),
+            "committed" => Some(Self::Committed),
+            "error" => Some(Self::Error),
+            "login" => Some(Self::Login),
+            _ => None,
+        }
+    }
+}
+
 pub struct Runtime {
     pub commands: Sender<ControllerCommand>,
-    vad_control: Sender<VadControl>,
+    vad_control: Option<Sender<VadControl>>,
     controller_thread: Option<thread::JoinHandle<()>>,
     vad_thread: Option<thread::JoinHandle<()>>,
+    preview_stop: Option<Sender<()>>,
+    preview_thread: Option<thread::JoinHandle<()>>,
+    preview_settings: bool,
 }
 
 impl Runtime {
@@ -22,10 +53,22 @@ impl Runtime {
         if let Some(controller_thread) = self.controller_thread.take() {
             let _ = controller_thread.join();
         }
-        let _ = self.vad_control.send(VadControl::Shutdown);
+        if let Some(stop) = self.preview_stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(preview_thread) = self.preview_thread.take() {
+            let _ = preview_thread.join();
+        }
+        if let Some(vad_control) = self.vad_control {
+            let _ = vad_control.send(VadControl::Shutdown);
+        }
         if let Some(vad_thread) = self.vad_thread.take() {
             let _ = vad_thread.join();
         }
+    }
+
+    pub(crate) fn is_settings_preview(&self) -> bool {
+        self.preview_settings
     }
 }
 
@@ -62,10 +105,84 @@ pub fn start(
 
     Ok(Runtime {
         commands,
-        vad_control,
+        vad_control: Some(vad_control),
         controller_thread: Some(controller_thread),
         vad_thread: Some(vad_thread),
+        preview_stop: None,
+        preview_thread: None,
+        preview_settings: false,
     })
+}
+
+pub fn start_preview(
+    _settings: Settings,
+    scenario: PreviewScenario,
+    to_ui: Sender<UiUpdate>,
+) -> Result<Runtime> {
+    let (commands, _command_rx) = crossbeam_channel::unbounded();
+    let (stop, stop_rx) = crossbeam_channel::bounded(1);
+    let preview_thread = thread::Builder::new()
+        .name("otoa-preview".to_string())
+        .spawn(move || {
+            send_preview_update(&to_ui, scenario);
+            loop {
+                crossbeam_channel::select! {
+                    recv(stop_rx) -> _ => break,
+                    default(std::time::Duration::from_millis(100)) => {
+                        send_preview_update(&to_ui, scenario);
+                    }
+                }
+            }
+        })?;
+
+    Ok(Runtime {
+        commands,
+        vad_control: None,
+        controller_thread: None,
+        vad_thread: None,
+        preview_stop: Some(stop),
+        preview_thread: Some(preview_thread),
+        preview_settings: matches!(scenario, PreviewScenario::Settings),
+    })
+}
+
+fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario) {
+    let view = match scenario {
+        PreviewScenario::Splash => OverlayView::Splash,
+        PreviewScenario::Settings => OverlayView::Hidden,
+        PreviewScenario::Connecting => preview_overlay(OverlayKind::Connecting),
+        PreviewScenario::Listening => preview_overlay(OverlayKind::Recognizing),
+        PreviewScenario::Finalizing => preview_overlay(OverlayKind::Finalizing),
+        PreviewScenario::Committed => preview_overlay(OverlayKind::Committed),
+        PreviewScenario::Error => preview_overlay(OverlayKind::Error),
+        PreviewScenario::Login => preview_overlay(OverlayKind::LoginNeeded),
+    };
+    let _ = to_ui.send(UiUpdate::Overlay(view));
+    let login_state = if matches!(scenario, PreviewScenario::Login) {
+        crate::controller::LoginState::LoggedOut
+    } else {
+        crate::controller::LoginState::LoggedIn {
+            email: "preview@example.invalid".to_string(),
+        }
+    };
+    let _ = to_ui.send(UiUpdate::LoginState(login_state));
+    let _ = to_ui.send(UiUpdate::Level {
+        peak: if matches!(scenario, PreviewScenario::Listening) {
+            (0.5 * f64::from(i16::MAX)) as i16
+        } else {
+            0
+        },
+        status: crate::controller::LevelStatus::Normal,
+    });
+}
+
+fn preview_overlay(kind: crate::controller::OverlayKind) -> OverlayView {
+    OverlayView::Shown {
+        kind,
+        committed: String::new(),
+        partial: String::new(),
+        error: String::new(),
+    }
 }
 
 fn spawn_vad_thread(

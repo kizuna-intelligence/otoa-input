@@ -51,6 +51,7 @@ pub fn run(
     ui_updates: Receiver<UiUpdate>,
     runtime: Runtime,
 ) -> anyhow::Result<()> {
+    let open_settings_on_start = runtime.is_settings_preview();
     let state = UiState {
         overlay_mode: RwSignal::new(OverlayMode::Splash),
         overlay_committed: RwSignal::new(String::new()),
@@ -100,11 +101,14 @@ pub fn run(
     #[cfg(target_os = "linux")]
     schedule_overlay_hints();
     let window_state = state;
-    app.window(
+    let app = app.window(
         move |window_id| overlay::view(window_state, overlay_commands.clone(), window_id),
         Some(overlay_window_config()),
-    )
-    .run();
+    );
+    if open_settings_on_start {
+        open_settings_window(state, runtime.commands.clone());
+    }
+    app.run();
 
     runtime.shutdown();
     Ok(())

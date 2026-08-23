@@ -70,6 +70,10 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
   --paste-test [文字列]
                       貼り付けだけを 1 回試して終了する。
                       文字を入れたい場所にカーソルを置いてから実行する
+  --preview-overlay=<状態>
+                      音声・接続なしで入力バーを表示する。
+                      splash/connecting/listening/finalizing/committed/error/login
+  --preview-settings  音声・接続なしで設定画面を表示する
   -h, --help          この使い方を表示する
 
 設定はトレイアイコンの「設定」から変更する。設定ファイルの場所は
@@ -123,6 +127,36 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         print!("{USAGE}");
         return Ok(());
     }
+
+    if let Some(argument) = arguments
+        .iter()
+        .find(|argument| argument.starts_with("--preview-overlay"))
+    {
+        let value = argument
+            .strip_prefix("--preview-overlay=")
+            .ok_or_else(|| anyhow::anyhow!("--preview-overlay は =状態 で指定してください"))?;
+        let scenario = wiring::PreviewScenario::parse(value).ok_or_else(|| {
+            anyhow::anyhow!(
+                "未知の preview 状態です: {value}（splash/connecting/listening/finalizing/committed/error/login）"
+            )
+        })?;
+        let settings = load_settings()?;
+        let (to_ui, ui_updates) = unbounded_channel();
+        let runtime = wiring::start_preview(settings.clone(), scenario, to_ui)?;
+        return ui::run(settings, ui_updates, runtime);
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == "--preview-settings")
+    {
+        let settings = load_settings()?;
+        let (to_ui, ui_updates) = unbounded_channel();
+        let runtime =
+            wiring::start_preview(settings.clone(), wiring::PreviewScenario::Settings, to_ui)?;
+        return ui::run(settings, ui_updates, runtime);
+    }
+
     if let Some(index) = arguments
         .iter()
         .position(|argument| argument == "--paste-test")

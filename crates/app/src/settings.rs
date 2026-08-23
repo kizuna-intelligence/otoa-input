@@ -93,4 +93,14 @@ mod tests {
         assert_eq!(saved["input_gain"], 3.0);
         assert_eq!(saved["product_only_field"], "keep me");
     }
+
+    #[test]
+    fn overlay_keys_survive_settings_json_round_trip() {
+        let json = r#"{"overlay_position":"top","overlay_transparent":"on","reduce_motion":true}"#;
+        let settings = serde_json::from_str::<Settings>(json).expect("settings should parse");
+        let saved = serde_json::to_value(&settings).expect("settings should serialize");
+        assert_eq!(saved["overlay_position"], "top");
+        assert_eq!(saved["overlay_transparent"], "on");
+        assert_eq!(saved["reduce_motion"], true);
+    }
 }
