@@ -15,7 +15,7 @@ use floem::{
     window::{WindowConfig, WindowLevel},
     AppEvent, Application,
 };
-use otoa_input_core::OverlayTransparency;
+use otoa_input_core::{OverlayTransparency, SessionState};
 #[cfg(target_os = "linux")]
 use otoa_input_platform::apply_overlay_hints;
 use otoa_input_platform::compositor_available;
@@ -30,6 +30,7 @@ pub struct UiState {
     pub(crate) overlay_committed: RwSignal<String>,
     pub(crate) overlay_partial: RwSignal<String>,
     pub(crate) overlay_error: RwSignal<String>,
+    pub(crate) session_state: RwSignal<SessionState>,
     pub(crate) level: RwSignal<f64>,
     pub(crate) level_status: RwSignal<LevelStatus>,
     pub(crate) route_local: RwSignal<Option<bool>>,
@@ -67,6 +68,7 @@ pub fn run(
         overlay_committed: RwSignal::new(String::new()),
         overlay_partial: RwSignal::new(String::new()),
         overlay_error: RwSignal::new(String::new()),
+        session_state: RwSignal::new(SessionState::Disabled),
         level: RwSignal::new(0.0),
         level_status: RwSignal::new(LevelStatus::Normal),
         route_local: RwSignal::new(None),
@@ -79,7 +81,12 @@ pub fn run(
     let ui_signal = create_signal_from_channel(ui_updates);
     let (tray_actions, tray_events) = crossbeam_channel::unbounded();
     let (tray_updates, tray_update_rx) = crossbeam_channel::unbounded();
-    if let Err(error) = tray::install(runtime.commands.clone(), tray_actions, tray_update_rx) {
+    if let Err(error) = tray::install(
+        runtime.commands.clone(),
+        tray_actions,
+        tray_update_rx,
+        account_settings_available,
+    ) {
         tracing::warn!("failed to initialize tray; continuing without tray: {error:#}");
     }
     let tray_updates_for_ui = tray_updates.clone();
@@ -154,12 +161,32 @@ pub(crate) fn open_settings_window(
     );
 }
 
-fn apply_ui_update(state: UiState, update: UiUpdate, _tray_updates: &Sender<tray::TrayUpdate>) {
+fn apply_ui_update(state: UiState, update: UiUpdate, tray_updates: &Sender<tray::TrayUpdate>) {
     match update {
         UiUpdate::State(session_state) => {
+            state.session_state.set(session_state);
+            let _ = tray_updates.send(tray::TrayUpdate::Session(session_state));
+            let _ = tray_updates.send(tray::TrayUpdate::Attention(
+                session_state == SessionState::Failed
+                    || login_needs_attention(state.login_state.get_untracked()),
+            ));
             tracing::trace!(?session_state, "session state update");
         }
-        UiUpdate::Overlay(view) => apply_overlay_update(state, view),
+        UiUpdate::Overlay(view) => {
+            let overlay_attention = matches!(
+                view,
+                OverlayView::Shown {
+                    kind: OverlayKind::Error | OverlayKind::LoginNeeded,
+                    ..
+                }
+            );
+            apply_overlay_update(state, view);
+            let _ = tray_updates.send(tray::TrayUpdate::Attention(
+                overlay_attention
+                    || state.session_state.get_untracked() == SessionState::Failed
+                    || login_needs_attention(state.login_state.get_untracked()),
+            ));
+        }
         UiUpdate::Level { peak, status } => {
             state
                 .level
@@ -170,9 +197,16 @@ fn apply_ui_update(state: UiState, update: UiUpdate, _tray_updates: &Sender<tray
         UiUpdate::Account { email } => state.account_email.set(email.unwrap_or_default()),
         UiUpdate::LoginState(login_state) => {
             state.login_state.set(login_state.clone());
-            let _ = _tray_updates.send(tray::TrayUpdate::LoginState(login_state));
+            let _ = tray_updates.send(tray::TrayUpdate::LoginState(login_state.clone()));
+            let _ = tray_updates.send(tray::TrayUpdate::Attention(login_needs_attention(
+                login_state,
+            )));
         }
     }
+}
+
+fn login_needs_attention(state: LoginState) -> bool {
+    matches!(state, LoginState::LoggedOut | LoginState::Failed { .. })
 }
 
 fn apply_overlay_update(state: UiState, view: OverlayView) {
