@@ -6,7 +6,7 @@
 ![デモ](docs/demo.gif)
 
 *話し終えると、認識結果がそのままカーソル位置へ貼り付きます。*
-*オーバーレイは「音声入力中」→「認識中」と状態を示します。*
+*オーバーレイは「聞き取り中」→「文字にしています」と状態を示します。*
 
 | | |
 |---|---|
@@ -137,6 +137,8 @@ sudo apt install \
 ./otoa-input --check-connection   # 認識サーバーへ繋がるか
 ./otoa-input --paste-test         # 貼り付けだけを試す
 ./otoa-input --help               # オプション一覧
+./otoa-input --preview-overlay=listening  # 入力バーを確認する
+./otoa-input --preview-settings=general   # 設定画面を確認する
 ```
 
 - **「認識モデルが見つかりません」** → 上の置き場所を確認してください。
@@ -214,7 +216,8 @@ VAD モデルはバイナリへ埋め込み）。別途要るのは認識モデ�
 
 ## 主な設定
 
-設定画面（トレイアイコン →「設定」）から変更できます。設定ファイルの場所は
+設定画面（トレイアイコン →「設定」）から変更できます。面は「一般」「マイク」
+「認識」「詳細」に分かれています。設定ファイルの場所は
 Linux なら `~/.config/otoa-input-oss/settings.json`、認識モデルの既定の探索先は
 `~/.local/share/otoa-input-oss/models/<選んだモデル名>` です。
 
@@ -227,6 +230,10 @@ Linux なら `~/.config/otoa-input-oss/settings.json`、認識モデルの既定
 | VAD しきい値 | 0.5 | 上げると拾いにくく、下げると誤検知が増える |
 | 無音判定 | 300 ms | これだけ黙ると区切る |
 | プリロール | 500 ms | 検知が遅れた分をさかのぼって送る長さ |
+| `overlay_position` | `center` | 入力バーの位置（中央・画面の下・画面の上） |
+| `overlay_transparent` | `auto` | 入力バーの透過表示 |
+| `reduce_motion` | `false` | 入力バーの動きを減らす |
+| `commit_hold_ms` | `900` | 貼り付けた結果を見せる時間（ミリ秒） |
 
 オプションの一覧は `--help` で出ます。
 

@@ -166,10 +166,7 @@ fn apply_ui_update(state: UiState, update: UiUpdate, tray_updates: &Sender<tray:
         UiUpdate::State(session_state) => {
             state.session_state.set(session_state);
             let _ = tray_updates.send(tray::TrayUpdate::Session(session_state));
-            let _ = tray_updates.send(tray::TrayUpdate::Attention(
-                session_state == SessionState::Failed
-                    || login_needs_attention(state.login_state.get_untracked()),
-            ));
+            let _ = tray_updates.send(tray::TrayUpdate::Attention(tray_needs_attention(state)));
             tracing::trace!(?session_state, "session state update");
         }
         UiUpdate::Overlay(view) => {
@@ -182,9 +179,7 @@ fn apply_ui_update(state: UiState, update: UiUpdate, tray_updates: &Sender<tray:
             );
             apply_overlay_update(state, view);
             let _ = tray_updates.send(tray::TrayUpdate::Attention(
-                overlay_attention
-                    || state.session_state.get_untracked() == SessionState::Failed
-                    || login_needs_attention(state.login_state.get_untracked()),
+                overlay_attention || tray_needs_attention(state),
             ));
         }
         UiUpdate::Level { peak, status } => {
@@ -198,11 +193,18 @@ fn apply_ui_update(state: UiState, update: UiUpdate, tray_updates: &Sender<tray:
         UiUpdate::LoginState(login_state) => {
             state.login_state.set(login_state.clone());
             let _ = tray_updates.send(tray::TrayUpdate::LoginState(login_state.clone()));
-            let _ = tray_updates.send(tray::TrayUpdate::Attention(login_needs_attention(
-                login_state,
-            )));
+            let _ = tray_updates.send(tray::TrayUpdate::Attention(tray_needs_attention(state)));
         }
     }
+}
+
+fn tray_needs_attention(state: UiState) -> bool {
+    state.session_state.get_untracked() == SessionState::Failed
+        || matches!(
+            state.overlay_mode.get_untracked(),
+            OverlayMode::Shown(OverlayKind::Error | OverlayKind::LoginNeeded)
+        )
+        || login_needs_attention(state.login_state.get_untracked())
 }
 
 fn login_needs_attention(state: LoginState) -> bool {

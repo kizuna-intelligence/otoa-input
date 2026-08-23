@@ -66,10 +66,10 @@ pub mod text {
 
     pub const TITLE_WEIGHT: Weight = Weight(700);
     pub const SECTION_WEIGHT: Weight = Weight(700);
-    pub const BODY_WEIGHT: Weight = Weight(600);
-    pub const BODY_SOFT_WEIGHT: Weight = Weight::MEDIUM;
+    pub const BODY_WEIGHT: Weight = Weight(700);
+    pub const BODY_SOFT_WEIGHT: Weight = Weight(400);
     pub const TRANSCRIPT_WEIGHT: Weight = Weight(700);
-    pub const CAPTION_WEIGHT: Weight = Weight::MEDIUM;
+    pub const CAPTION_WEIGHT: Weight = Weight(400);
     pub const MICRO_WEIGHT: Weight = Weight(700);
 }
 
@@ -149,6 +149,6 @@ pub fn font_family() -> &'static str {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        "Noto Sans CJK JP, Noto Sans JP, Noto Sans, IPAexGothic, sans-serif"
+        "Noto Sans CJK JP, Noto Sans JP, IPAexGothic, sans-serif"
     }
 }

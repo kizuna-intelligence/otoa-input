@@ -165,18 +165,24 @@ pub fn view(
         smooth_level,
         running: level_ticker_running,
         generation: level_ticker_generation,
+        reduce_motion,
         generation_value: 0,
     };
     create_effect(move |_| {
         let selected_page = page.get();
+        let reduced = reduce_motion.get();
         let generation_value = level_ticker_generation.get_untracked().wrapping_add(1);
         level_ticker_generation.set(generation_value);
         if selected_page == SettingsPage::Microphone {
-            LevelTicker {
-                generation_value,
-                ..ticker
+            if reduced {
+                smooth_level.set(state.level.get_untracked().clamp(0.0, 1.0));
+            } else {
+                LevelTicker {
+                    generation_value,
+                    ..ticker
+                }
+                .schedule(Instant::now(), smooth_level.get_untracked());
             }
-            .schedule(Instant::now(), smooth_level.get_untracked());
         }
     });
 
@@ -477,13 +483,13 @@ fn general_page(form: FormState) -> impl IntoView {
             setting_row(
                 "起動時に待受を始める",
                 caption("起動したらすぐ話せる状態にします"),
-                toggle_control(form.listening_enabled),
+                toggle_control(form.listening_enabled, form.reduce_motion),
             )
             .into_any(),
             setting_row(
                 "確定後に自動で貼り付ける",
                 caption("オフのときはクリップボードに置くだけにします"),
-                toggle_control(form.auto_paste),
+                toggle_control(form.auto_paste, form.reduce_motion),
             )
             .into_any(),
             setting_row(
@@ -520,7 +526,7 @@ fn general_page(form: FormState) -> impl IntoView {
                     })
                     .style(caption_style),
                 ))
-                .style(|style| style.width(240.0).items_center().gap(theme::space::MD)),
+                .style(|style| style.width(292.0).items_center().gap(theme::space::MD)),
             )
             .into_any(),
             setting_row(
@@ -532,7 +538,7 @@ fn general_page(form: FormState) -> impl IntoView {
             setting_row(
                 "動きを減らす",
                 caption("光の輪や点滅を止めます"),
-                toggle_control(form.reduce_motion),
+                toggle_control(form.reduce_motion, form.reduce_motion),
             )
             .into_any(),
         ],
@@ -564,13 +570,13 @@ fn microphone_page(form: FormState, state: UiState, smooth_level: RwSignal<f64>)
                     label(move || format!("×{:.1}", gain_from_pct(form.gain.get())))
                         .style(caption_style),
                 ))
-                .style(|style| style.width(240.0).items_center().gap(theme::space::MD)),
+                .style(|style| style.width(292.0).items_center().gap(theme::space::MD)),
             )
             .into_any(),
             setting_row(
                 "入力レベル",
                 caption("いま話して、青の範囲に入るように調整します"),
-                level_meter(state, smooth_level),
+                level_meter(state, smooth_level, form.reduce_motion),
             )
             .into_any(),
         ],
@@ -851,10 +857,19 @@ fn route_description(route: Option<bool>, server_url: &str) -> String {
     }
 }
 
-fn level_meter(state: UiState, smooth_level: RwSignal<f64>) -> impl IntoView {
+fn level_meter(
+    state: UiState,
+    smooth_level: RwSignal<f64>,
+    reduce_motion: RwSignal<bool>,
+) -> impl IntoView {
     let bars = h_stack_from_iter((0..20).map(|index| {
         empty().style(move |style| {
-            let lit = (smooth_level.get().clamp(0.0, 1.0) * 20.0).floor() as usize > index;
+            let level = if reduce_motion.get() {
+                state.level.get().clamp(0.0, 1.0)
+            } else {
+                smooth_level.get().clamp(0.0, 1.0)
+            };
+            let lit = (level * 20.0).floor() as usize > index;
             let color = if !lit {
                 theme::color::LINE
             } else if index < 14 {
@@ -1031,7 +1046,7 @@ fn slider_control(signal: RwSignal<Pct>) -> impl IntoView {
     stack((slider, handle)).style(|style| style.size(240.0, 24.0))
 }
 
-fn toggle_control(signal: RwSignal<bool>) -> impl IntoView {
+fn toggle_control(signal: RwSignal<bool>, reduce_motion: RwSignal<bool>) -> impl IntoView {
     toggle_button(move || signal.get())
         .on_toggle(move |value| signal.set(value))
         .toggle_style(|style| {
@@ -1049,7 +1064,9 @@ fn toggle_control(signal: RwSignal<bool>) -> impl IntoView {
                 } else {
                     theme::color::LINE
                 })
-                .transition_background(Transition::ease_in_out(Duration::from_millis(200)))
+                .apply_if(!reduce_motion.get(), |style| {
+                    style.transition_background(Transition::ease_in_out(Duration::from_millis(200)))
+                })
         })
 }
 
@@ -1538,6 +1555,7 @@ struct LevelTicker {
     smooth_level: RwSignal<f64>,
     running: RwSignal<bool>,
     generation: RwSignal<u64>,
+    reduce_motion: RwSignal<bool>,
     generation_value: u64,
 }
 
@@ -1547,6 +1565,7 @@ impl LevelTicker {
             if !self.running.get_untracked()
                 || self.generation.get_untracked() != self.generation_value
                 || self.page.get_untracked() != SettingsPage::Microphone
+                || self.reduce_motion.get_untracked()
             {
                 return;
             }

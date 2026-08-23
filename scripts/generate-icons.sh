@@ -24,7 +24,14 @@ trap 'rm -f "$template_svg" "$normal_svg" "$attention_svg" "$stopped_svg"' EXIT
 # 通常はマーク本体だけ、要対応時だけ右下の琥珀の点を足す。
 sed '/<circle cx="716" cy="716"/d' "$ICON_DIR/otoa-input.svg" >"$normal_svg"
 cp "$ICON_DIR/otoa-input.svg" "$attention_svg"
-sed 's/currentColor/#9fb3d6/g' "$ICON_DIR/otoa-mark.svg" >"$stopped_svg"
+# 停止中も暗いパネル上で見えるよう、角丸四角の地だけを NAVY_SOFT にする。
+# アプリマークの装飾と琥珀の点は除き、輪とバーは白のまま残す。
+sed \
+  -e 's/fill="#2f7fe0"/fill="#9fb3d6"/' \
+  -e '/<circle cx="284"/d' \
+  -e '/<circle cx="762"/d' \
+  -e '/<circle cx="716"/d' \
+  "$ICON_DIR/otoa-input.svg" >"$stopped_svg"
 
 for size in 16 22 24 32 48; do
   for variant in normal attention stopped; do

@@ -174,6 +174,9 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::Settings;
+    use std::sync::{Mutex, PoisonError};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn defaults_are_upstream_jp() {
@@ -234,6 +237,7 @@ mod tests {
 
     #[test]
     fn server_url_environment_overrides_settings() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let settings = Settings {
             server_url: "wss://settings.example/ws/asr".to_string(),
             ..Settings::default()
@@ -252,6 +256,7 @@ mod tests {
 
     #[test]
     fn unset_server_url_leaves_the_default_to_the_provider() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         // 既定値を core が持つと、接続先を差し替えたときに間違った先へ繋ぐ。
         assert_eq!(Settings::default().resolved_server_url(), None);
     }

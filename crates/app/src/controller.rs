@@ -152,9 +152,9 @@ pub struct Controller {
     /// Stop を送信済み、または Finished を受信済みで終了処理中。
     asr_closing: bool,
     /// endpoint_mode=client のとき、finalize を送ってから次の発話開始までの抑止。
-    /// これが無いと SpeechEnded のたびに finalize を送り、同じ確定を繰り返す。
+    /// これが無いと SpeechEnded のたびに finalize を送り、同じ貼り付けを繰り返す。
     client_finalize_sent: bool,
-    /// `finalize` を送ってから結果が返るまで。オーバーレイの「認識中」表示に使う。
+    /// `finalize` を送ってから結果が返るまで。オーバーレイの「文字にしています」表示に使う。
     finalize_pending: bool,
     /// Failed に入った時刻。自動復帰対象でない失敗では使わない。
     failed_at: Option<Instant>,
@@ -1291,7 +1291,7 @@ impl Controller {
         } else if self.session.state() == SessionState::Streaming
             && (self.gate.is_speaking() || self.finalize_pending || !self.transcript.is_empty())
         {
-            // 発話中は「音声入力中」、finalize の結果待ちは「認識中」。
+            // 発話中は「聞き取り中」、finalize の結果待ちは「文字にしています」。
             // 結果待ちを表示しないと、話し終わってから貼り付くまでの
             // 数百ミリ秒〜1 秒、窓が消えて止まったように見える。
             let kind = if self.gate.is_speaking() {
@@ -1892,9 +1892,9 @@ mod tests {
         });
         let mut controller = test_controller(settings);
 
-        controller.commit_segment(Some("確定テキスト".to_string()));
+        controller.commit_segment(Some("貼り付けテキスト".to_string()));
         let (committed, partial) = committed_overlay(&controller);
-        assert_eq!(committed, "確定テキスト");
+        assert_eq!(committed, "貼り付けテキスト");
         assert!(partial.is_empty());
 
         controller.committed_hold_until = Some(Instant::now() - Duration::from_millis(1));
@@ -2011,7 +2011,7 @@ mod tests {
         assert!(controller.session.apply(SessionInput::Enable));
         assert!(controller.session.apply(SessionInput::SpeechStarted));
         assert!(controller.session.apply(SessionInput::Connected));
-        controller.transcript.replace_partial("認識中");
+        controller.transcript.replace_partial("途中の文字");
 
         controller.refresh_overlay();
 
@@ -2020,7 +2020,7 @@ mod tests {
             OverlayView::Shown {
                 kind: OverlayKind::Recognizing,
                 committed: String::new(),
-                partial: "認識中".to_string(),
+                partial: "途中の文字".to_string(),
                 error: String::new(),
             }
         );
@@ -2050,8 +2050,8 @@ mod tests {
 
     #[test]
     fn speech_ended_in_client_mode_shows_finalizing_until_the_result_arrives() {
-        // 話し終えてから確定が返るまでオーバーレイを隠すと、認識が止まった
-        // ように見える。この区間は「認識中」を出し続ける。
+        // 話し終えてから結果が返るまでオーバーレイを隠すと、認識が止まった
+        // ように見える。この区間は「文字にしています」を出し続ける。
         let settings = settings_with(|settings| {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
@@ -2092,7 +2092,7 @@ mod tests {
         assert!(controller.session.apply(SessionInput::Enable));
         assert!(controller.session.apply(SessionInput::SpeechStarted));
         assert!(controller.session.apply(SessionInput::Connected));
-        controller.transcript.push_final("確定テキスト");
+        controller.transcript.push_final("貼り付けテキスト");
         controller.refresh_overlay();
 
         controller.handle_asr_event(AsrEvent::Endpoint);
