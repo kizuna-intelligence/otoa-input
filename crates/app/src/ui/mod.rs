@@ -6,20 +6,19 @@ pub mod tray;
 use crate::controller::LoginState;
 use crate::controller::{ControllerCommand, LevelStatus, OverlayKind, OverlayView, UiUpdate};
 use crate::settings::Settings;
-use crate::wiring::Runtime;
+use crate::wiring::{Runtime, SettingsPage};
 use crossbeam_channel::{Receiver, Sender};
 use floem::{
     ext_event::create_signal_from_channel,
-    new_window,
-    peniko::kurbo::Point,
-    quit_app,
+    new_window, quit_app,
     reactive::{create_effect, RwSignal, SignalGet, SignalUpdate},
     window::{WindowConfig, WindowLevel},
     AppEvent, Application,
 };
+use otoa_input_core::{OverlayTransparency, SessionState};
 #[cfg(target_os = "linux")]
 use otoa_input_platform::apply_overlay_hints;
-use otoa_input_platform::primary_screen_size;
+use otoa_input_platform::compositor_available;
 #[cfg(target_os = "linux")]
 use std::{thread, time::Duration};
 #[cfg(target_os = "linux")]
@@ -31,12 +30,15 @@ pub struct UiState {
     pub(crate) overlay_committed: RwSignal<String>,
     pub(crate) overlay_partial: RwSignal<String>,
     pub(crate) overlay_error: RwSignal<String>,
+    pub(crate) session_state: RwSignal<SessionState>,
     pub(crate) level: RwSignal<f64>,
     pub(crate) level_status: RwSignal<LevelStatus>,
+    pub(crate) route_local: RwSignal<Option<bool>>,
     pub(crate) account_email: RwSignal<String>,
     pub(crate) login_state: RwSignal<LoginState>,
     pub(crate) settings: RwSignal<Settings>,
     pub(crate) settings_window_open: RwSignal<bool>,
+    pub(crate) account_settings_available: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -51,22 +53,40 @@ pub fn run(
     ui_updates: Receiver<UiUpdate>,
     runtime: Runtime,
 ) -> anyhow::Result<()> {
+    let open_settings_on_start = runtime.is_settings_preview();
+    let settings_preview_page = runtime
+        .settings_preview_page()
+        .unwrap_or(SettingsPage::General);
+    let account_settings_available = runtime.account_settings_available();
+    let overlay_transparent = resolve_overlay_transparency(&settings);
     let state = UiState {
-        overlay_mode: RwSignal::new(OverlayMode::Splash),
+        overlay_mode: RwSignal::new(if open_settings_on_start {
+            OverlayMode::Hidden
+        } else {
+            OverlayMode::Splash
+        }),
         overlay_committed: RwSignal::new(String::new()),
         overlay_partial: RwSignal::new(String::new()),
         overlay_error: RwSignal::new(String::new()),
+        session_state: RwSignal::new(SessionState::Disabled),
         level: RwSignal::new(0.0),
         level_status: RwSignal::new(LevelStatus::Normal),
+        route_local: RwSignal::new(None),
         account_email: RwSignal::new(String::new()),
         login_state: RwSignal::new(LoginState::LoggedOut),
         settings: RwSignal::new(settings.clone()),
         settings_window_open: RwSignal::new(false),
+        account_settings_available,
     };
     let ui_signal = create_signal_from_channel(ui_updates);
     let (tray_actions, tray_events) = crossbeam_channel::unbounded();
     let (tray_updates, tray_update_rx) = crossbeam_channel::unbounded();
-    if let Err(error) = tray::install(runtime.commands.clone(), tray_actions, tray_update_rx) {
+    if let Err(error) = tray::install(
+        runtime.commands.clone(),
+        tray_actions,
+        tray_update_rx,
+        account_settings_available,
+    ) {
         tracing::warn!("failed to initialize tray; continuing without tray: {error:#}");
     }
     let tray_updates_for_ui = tray_updates.clone();
@@ -84,7 +104,7 @@ pub fn run(
         };
         match action {
             tray::TrayAction::OpenSettings => {
-                open_settings_window(state, settings_commands.clone());
+                open_settings_window(state, settings_commands.clone(), SettingsPage::General);
             }
             tray::TrayAction::Quit => quit_app(),
         }
@@ -100,56 +120,95 @@ pub fn run(
     #[cfg(target_os = "linux")]
     schedule_overlay_hints();
     let window_state = state;
-    app.window(
-        move |window_id| overlay::view(window_state, overlay_commands.clone(), window_id),
-        Some(overlay_window_config()),
-    )
-    .run();
+    let app = app.window(
+        move |window_id| {
+            overlay::view(
+                window_state,
+                overlay_commands.clone(),
+                window_id,
+                overlay_transparent,
+            )
+        },
+        Some(overlay_window_config(&settings, overlay_transparent)),
+    );
+    if open_settings_on_start {
+        open_settings_window(state, runtime.commands.clone(), settings_preview_page);
+    }
+    app.run();
 
     runtime.shutdown();
     Ok(())
 }
 
-pub(crate) fn open_settings_window(state: UiState, commands: Sender<ControllerCommand>) {
+pub(crate) fn open_settings_window(
+    state: UiState,
+    commands: Sender<ControllerCommand>,
+    initial_page: SettingsPage,
+) {
     if state.settings_window_open.get_untracked() {
         return;
     }
     state.settings_window_open.set(true);
     let settings = state.settings.get_untracked();
     new_window(
-        move |window_id| settings_view::view(settings, state, commands, window_id),
+        move |window_id| settings_view::view(settings, state, commands, window_id, initial_page),
         Some(
             WindowConfig::default()
-                .size((560.0, settings_window_initial_height()))
-                .title("Otoa Input 設定"),
+                .size((720.0, 600.0))
+                .title("Otoa Input の設定")
+                .resizable(true),
         ),
     );
 }
 
-fn settings_window_initial_height() -> f64 {
-    primary_screen_size()
-        .map(|(_, height)| (height * 0.9).min(720.0))
-        .unwrap_or(720.0)
-}
-
-fn apply_ui_update(state: UiState, update: UiUpdate, _tray_updates: &Sender<tray::TrayUpdate>) {
+fn apply_ui_update(state: UiState, update: UiUpdate, tray_updates: &Sender<tray::TrayUpdate>) {
     match update {
         UiUpdate::State(session_state) => {
+            state.session_state.set(session_state);
+            let _ = tray_updates.send(tray::TrayUpdate::Session(session_state));
+            let _ = tray_updates.send(tray::TrayUpdate::Attention(tray_needs_attention(state)));
             tracing::trace!(?session_state, "session state update");
         }
-        UiUpdate::Overlay(view) => apply_overlay_update(state, view),
+        UiUpdate::Overlay(view) => {
+            let overlay_attention = matches!(
+                view,
+                OverlayView::Shown {
+                    kind: OverlayKind::Error | OverlayKind::LoginNeeded,
+                    ..
+                }
+            );
+            apply_overlay_update(state, view);
+            let _ = tray_updates.send(tray::TrayUpdate::Attention(
+                overlay_attention || tray_needs_attention(state),
+            ));
+        }
         UiUpdate::Level { peak, status } => {
             state
                 .level
                 .set((f64::from(peak.unsigned_abs()) / f64::from(i16::MAX)).clamp(0.0, 1.0));
             state.level_status.set(status);
         }
+        UiUpdate::Route { local } => state.route_local.set(Some(local)),
         UiUpdate::Account { email } => state.account_email.set(email.unwrap_or_default()),
         UiUpdate::LoginState(login_state) => {
             state.login_state.set(login_state.clone());
-            let _ = _tray_updates.send(tray::TrayUpdate::LoginState(login_state));
+            let _ = tray_updates.send(tray::TrayUpdate::LoginState(login_state.clone()));
+            let _ = tray_updates.send(tray::TrayUpdate::Attention(tray_needs_attention(state)));
         }
     }
+}
+
+fn tray_needs_attention(state: UiState) -> bool {
+    state.session_state.get_untracked() == SessionState::Failed
+        || matches!(
+            state.overlay_mode.get_untracked(),
+            OverlayMode::Shown(OverlayKind::Error | OverlayKind::LoginNeeded)
+        )
+        || login_needs_attention(state.login_state.get_untracked())
+}
+
+fn login_needs_attention(state: LoginState) -> bool {
+    matches!(state, LoginState::LoggedOut | LoginState::Failed { .. })
 }
 
 fn apply_overlay_update(state: UiState, view: OverlayView) {
@@ -188,25 +247,33 @@ fn apply_overlay_update(state: UiState, view: OverlayView) {
     }
 }
 
-fn overlay_window_config() -> WindowConfig {
-    let mut config = WindowConfig::default().size(overlay::SPLASH_SIZE);
-    if let Some((sw, sh)) = primary_screen_size() {
-        config = config.position(Point::new(
-            (sw - overlay::SPLASH_SIZE.width) / 2.0,
-            (sh - overlay::SPLASH_SIZE.height) / 2.0,
-        ));
-        tracing::debug!(
-            "overlay initial bounds x={} y={} w=360 h=200 source=primary_screen",
-            (sw - overlay::SPLASH_SIZE.width) / 2.0,
-            (sh - overlay::SPLASH_SIZE.height) / 2.0,
-        );
-    }
-    config
+fn resolve_overlay_transparency(settings: &Settings) -> bool {
+    let compositor = compositor_available();
+    let requested = settings.overlay_transparency();
+    let transparent = match requested {
+        OverlayTransparency::On => true,
+        OverlayTransparency::Off => false,
+        OverlayTransparency::Auto => compositor,
+    };
+    tracing::info!(
+        requested = ?requested,
+        compositor_available = compositor,
+        transparent,
+        "overlay transparency resolved at startup"
+    );
+    transparent
+}
+
+fn overlay_window_config(settings: &Settings, transparent: bool) -> WindowConfig {
+    tracing::debug!(position = ?settings.overlay_position(), transparent, "overlay initial window config");
+    WindowConfig::default()
+        .size(overlay::initial_window_size(transparent))
         .title("Otoa Input")
         .undecorated(true)
         .show_titlebar(false)
         .resizable(false)
-        .with_transparent(false)
+        .with_transparent(transparent)
+        .undecorated_shadow(false)
         .window_level(WindowLevel::AlwaysOnTop)
         .apply_default_theme(false)
 }

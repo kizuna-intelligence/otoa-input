@@ -1,0 +1,8 @@
+# Otoa Input 0.2.0
+
+- 入力バーの見た目を刷新し、中央・画面の下・画面の上から位置を選べるようにしました。
+- 設定画面を「一般」「マイク」「認識」「詳細」などの面に分けて作り直しました。
+- 待受状態と要対応状態を表すトレイアイコンを追加しました。
+- `overlay_position`、`overlay_transparent`、`reduce_motion` を設定できるようにしました。
+- `commit_hold_ms` の既定値を 900 ms に変更しました。
+- `--preview-overlay` と `--preview-settings` で入力バーと設定画面を確認できるようにしました。

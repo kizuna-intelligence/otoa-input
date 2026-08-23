@@ -23,6 +23,8 @@ atom_manager! {
         _NET_WM_STATE_SKIP_PAGER,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_UTILITY,
+        _NET_WORKAREA,
+        _NET_WM_CM_S0,
     }
 }
 
@@ -54,6 +56,66 @@ pub fn primary_screen_size() -> Option<(f64, f64)> {
     Some((
         f64::from(screen.width_in_pixels),
         f64::from(screen.height_in_pixels),
+    ))
+}
+
+/// Linux/X11 で透過したウィンドウを正しく合成できるかを返す。
+/// Wayland と X11 以外のプラットフォームでは呼び出し側が true を返す。
+pub fn compositor_available() -> bool {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return true;
+    }
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return false;
+    };
+    let Some(atoms) = OverlayAtoms::new(&conn)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+    else {
+        return false;
+    };
+    match conn
+        .get_selection_owner(atoms._NET_WM_CM_S0)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+    {
+        Some(reply) => reply.owner != 0,
+        None => {
+            tracing::debug!(screen_num, "could not query X11 compositor selection owner");
+            false
+        }
+    }
+}
+
+/// X11 の `_NET_WORKAREA`。パネルを除いた (x, y, width, height) を返す。
+pub fn primary_workarea() -> Option<(f64, f64, f64, f64)> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_none() {
+        return None;
+    }
+    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let screen = conn.setup().roots.get(screen_num)?;
+    let atoms = OverlayAtoms::new(&conn).ok()?.reply().ok()?;
+    let reply = conn
+        .get_property(
+            false,
+            screen.root,
+            atoms._NET_WORKAREA,
+            AtomEnum::CARDINAL,
+            0,
+            4,
+        )
+        .ok()?
+        .reply()
+        .ok()?;
+    let values = reply.value32()?.take(4).collect::<Vec<_>>();
+    if values.len() != 4 {
+        return None;
+    }
+    Some((
+        f64::from(values[0]),
+        f64::from(values[1]),
+        f64::from(values[2]),
+        f64::from(values[3]),
     ))
 }
 

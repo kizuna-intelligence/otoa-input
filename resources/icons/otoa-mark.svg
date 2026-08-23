@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Otoa mark">
+  <circle cx="512" cy="512" r="292" fill="none" stroke="currentColor" stroke-width="92"/>
+  <g fill="none" stroke="currentColor" stroke-width="54" stroke-linecap="round">
+    <path d="M420 530v-86"/>
+    <path d="M512 560V372"/>
+    <path d="M604 530v-86"/>
+  </g>
+</svg>

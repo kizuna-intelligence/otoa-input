@@ -1,5 +1,19 @@
 use std::fmt;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayPosition {
+    Bottom,
+    Top,
+    Center,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayTransparency {
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -60,6 +74,12 @@ pub struct Settings {
     pub commit_hold_ms: u32,
     /// スプラッシュを表示する時間（ミリ秒）。
     pub splash_ms: u32,
+    /// 入力バーの位置。`center`（既定）、`bottom`、`top`。
+    pub overlay_position: String,
+    /// 入力バーの透過。`auto`（既定）、`on`、`off`。
+    pub overlay_transparent: String,
+    /// 輪・キャレット・待機 EQ のアニメーションを止めるか。
+    pub reduce_motion: bool,
 }
 
 impl fmt::Debug for Settings {
@@ -86,6 +106,9 @@ impl fmt::Debug for Settings {
             .field("paste_per_endpoint", &self.paste_per_endpoint)
             .field("commit_hold_ms", &self.commit_hold_ms)
             .field("splash_ms", &self.splash_ms)
+            .field("overlay_position", &self.overlay_position)
+            .field("overlay_transparent", &self.overlay_transparent)
+            .field("reduce_motion", &self.reduce_motion)
             .finish()
     }
 }
@@ -111,8 +134,11 @@ impl Default for Settings {
             microphone: String::new(),
             auto_paste: true,
             paste_per_endpoint: true,
-            commit_hold_ms: 0,
+            commit_hold_ms: 900,
             splash_ms: 2500,
+            overlay_position: "center".to_string(),
+            overlay_transparent: "auto".to_string(),
+            reduce_motion: false,
         }
     }
 }
@@ -127,11 +153,30 @@ impl Settings {
             .filter(|value| !value.trim().is_empty())
             .or_else(|| (!self.server_url.trim().is_empty()).then(|| self.server_url.clone()))
     }
+
+    pub fn overlay_position(&self) -> OverlayPosition {
+        match self.overlay_position.as_str() {
+            "top" => OverlayPosition::Top,
+            "center" => OverlayPosition::Center,
+            _ => OverlayPosition::Center,
+        }
+    }
+
+    pub fn overlay_transparency(&self) -> OverlayTransparency {
+        match self.overlay_transparent.as_str() {
+            "on" => OverlayTransparency::On,
+            "off" => OverlayTransparency::Off,
+            _ => OverlayTransparency::Auto,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Settings;
+    use std::sync::{Mutex, PoisonError};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn defaults_are_upstream_jp() {
@@ -146,8 +191,11 @@ mod tests {
         assert_eq!(settings.idle_close_sec, 15);
         assert!(settings.auto_paste);
         assert!(settings.paste_per_endpoint);
-        assert_eq!(settings.commit_hold_ms, 0);
+        assert_eq!(settings.commit_hold_ms, 900);
         assert_eq!(settings.splash_ms, 2500);
+        assert_eq!(settings.overlay_position, "center");
+        assert_eq!(settings.overlay_transparent, "auto");
+        assert!(!settings.reduce_motion);
     }
 
     #[test]
@@ -159,8 +207,8 @@ mod tests {
     }
 
     #[test]
-    fn commit_hold_defaults_to_zero_ms() {
-        assert_eq!(Settings::default().commit_hold_ms, 0);
+    fn commit_hold_defaults_to_900_ms() {
+        assert_eq!(Settings::default().commit_hold_ms, 900);
     }
 
     #[test]
@@ -173,8 +221,11 @@ mod tests {
         assert_eq!(settings.vad_threshold, Settings::default().vad_threshold);
         assert_eq!(settings.input_gain, Settings::default().input_gain);
         assert_eq!(settings.auto_paste, Settings::default().auto_paste);
-        assert_eq!(settings.commit_hold_ms, 0);
+        assert_eq!(settings.commit_hold_ms, 900);
         assert_eq!(settings.splash_ms, 2500);
+        assert_eq!(settings.overlay_position, "center");
+        assert_eq!(settings.overlay_transparent, "auto");
+        assert!(!settings.reduce_motion);
     }
 
     #[test]
@@ -186,6 +237,7 @@ mod tests {
 
     #[test]
     fn server_url_environment_overrides_settings() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let settings = Settings {
             server_url: "wss://settings.example/ws/asr".to_string(),
             ..Settings::default()
@@ -204,6 +256,7 @@ mod tests {
 
     #[test]
     fn unset_server_url_leaves_the_default_to_the_provider() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         // 既定値を core が持つと、接続先を差し替えたときに間違った先へ繋ぐ。
         assert_eq!(Settings::default().resolved_server_url(), None);
     }
@@ -214,5 +267,30 @@ mod tests {
             serde_json::from_str(r#"{"gateway_url":"wss://old.example/ws/asr"}"#)
                 .expect("settings should deserialize");
         assert_eq!(settings.server_url, "wss://old.example/ws/asr");
+    }
+
+    #[test]
+    fn unknown_overlay_values_fall_back_to_safe_defaults() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"overlay_position":"diagonal","overlay_transparent":"sometimes"}"#,
+        )
+        .expect("unknown overlay values should deserialize");
+        assert_eq!(settings.overlay_position(), super::OverlayPosition::Center);
+        assert_eq!(
+            settings.overlay_transparency(),
+            super::OverlayTransparency::Auto
+        );
+    }
+
+    #[test]
+    fn overlay_settings_round_trip() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"overlay_position":"top","overlay_transparent":"off","reduce_motion":true}"#,
+        )
+        .expect("overlay settings should deserialize");
+        let saved = serde_json::to_value(&settings).expect("settings should serialize");
+        assert_eq!(saved["overlay_position"], "top");
+        assert_eq!(saved["overlay_transparent"], "off");
+        assert_eq!(saved["reduce_motion"], true);
     }
 }

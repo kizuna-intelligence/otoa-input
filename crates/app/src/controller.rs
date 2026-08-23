@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use url::Url;
 
 const PENDING_AUDIO_LIMIT: usize = 100;
 const CONTROLLER_TICK: Duration = Duration::from_millis(100);
@@ -65,6 +66,7 @@ pub enum UiUpdate {
     Level { peak: i16, status: LevelStatus },
     Account { email: Option<String> },
     LoginState(LoginState),
+    Route { local: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,9 +152,9 @@ pub struct Controller {
     /// Stop を送信済み、または Finished を受信済みで終了処理中。
     asr_closing: bool,
     /// endpoint_mode=client のとき、finalize を送ってから次の発話開始までの抑止。
-    /// これが無いと SpeechEnded のたびに finalize を送り、同じ確定を繰り返す。
+    /// これが無いと SpeechEnded のたびに finalize を送り、同じ貼り付けを繰り返す。
     client_finalize_sent: bool,
-    /// `finalize` を送ってから結果が返るまで。オーバーレイの「認識中」表示に使う。
+    /// `finalize` を送ってから結果が返るまで。オーバーレイの「文字にしています」表示に使う。
     finalize_pending: bool,
     /// Failed に入った時刻。自動復帰対象でない失敗では使わない。
     failed_at: Option<Instant>,
@@ -268,6 +270,7 @@ impl Controller {
         self.send_ui(UiUpdate::State(self.session.state()));
         self.send_account_update();
         self.send_login_state();
+        self.send_route_update();
         self.send_ui(UiUpdate::Overlay(self.overlay.clone()));
         if self.settings.listening_enabled && !self.connection_needs_attention() {
             self.enable_listening();
@@ -536,6 +539,7 @@ impl Controller {
         let product_settings = settings.product_settings_value();
         self.provider
             .update_settings(&settings.core, product_settings.as_ref());
+        self.send_route_update_for(&settings);
         if matches!(
             self.session.state(),
             SessionState::Disabled | SessionState::Failed
@@ -837,10 +841,27 @@ impl Controller {
                 self.log_session_event("Connected");
             }
             AsrEvent::FinalText(tokens) => {
+                // finalize と同じ応答に含まれる FinalText は現在の発話の
+                // 確定結果なので受け取る。FinalizeDone 後、次の発話前に届く
+                // 遅れた結果は次の区切りへ混ざるため捨てる。
+                if self.client_finalize_sent && !self.gate.is_speaking() && !self.finalize_pending {
+                    tracing::debug!(
+                        target: "otoa_input",
+                        "ignored final text after client finalize until next speech"
+                    );
+                    return;
+                }
                 self.transcript.push_final(&tokens_to_text(&tokens));
                 self.send_text_update(true);
             }
             AsrEvent::PartialText(tokens) => {
+                if self.client_finalize_sent && !self.gate.is_speaking() {
+                    tracing::debug!(
+                        target: "otoa_input",
+                        "ignored partial text after client finalize until next speech"
+                    );
+                    return;
+                }
                 let text = tokens_to_text(&tokens);
                 let had_commit_hold = !text.is_empty() && self.clear_commit_hold();
                 self.transcript.replace_partial(&text);
@@ -1223,7 +1244,7 @@ impl Controller {
             kind: OverlayKind::Error,
             committed: String::new(),
             partial: String::new(),
-            error: message,
+            error: format!("{message}\nクリックで再試行"),
         });
     }
 
@@ -1287,7 +1308,7 @@ impl Controller {
         } else if self.session.state() == SessionState::Streaming
             && (self.gate.is_speaking() || self.finalize_pending || !self.transcript.is_empty())
         {
-            // 発話中は「音声入力中」、finalize の結果待ちは「認識中」。
+            // 発話中は「聞き取り中」、finalize の結果待ちは「文字にしています」。
             // 結果待ちを表示しないと、話し終わってから貼り付くまでの
             // 数百ミリ秒〜1 秒、窓が消えて止まったように見える。
             let kind = if self.gate.is_speaking() {
@@ -1319,6 +1340,25 @@ impl Controller {
 
     fn send_ui(&self, update: UiUpdate) {
         let _ = self.to_ui.try_send(update);
+    }
+
+    fn send_route_update(&self) {
+        self.send_route_update_for(&self.settings);
+    }
+
+    fn send_route_update_for(&self, settings: &Settings) {
+        let Ok(endpoint) = self.provider.endpoint(&settings.core) else {
+            return;
+        };
+        let Ok(url) = Url::parse(&endpoint.url) else {
+            return;
+        };
+        let Some(host) = url.host_str() else {
+            return;
+        };
+        self.send_ui(UiUpdate::Route {
+            local: is_loopback_host(host),
+        });
     }
 
     fn log_session_event(&self, event: &'static str) {
@@ -1612,18 +1652,28 @@ fn take_pending(pending: &mut String) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_input_gain, combine_readiness, failed_retry_is_due, is_nonfatal_asr_error,
-        level_status, next_failed_retry_delay, Controller, LevelStatus, OverlayKind, OverlayView,
-        FAILED_RETRY_INITIAL, FAILED_RETRY_MAX, GATEWAY_URL_MISSING_MESSAGE,
+        apply_input_gain, combine_readiness, failed_retry_is_due, is_loopback_host,
+        is_nonfatal_asr_error, level_status, next_failed_retry_delay, Controller, LevelStatus,
+        OverlayKind, OverlayView, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
+        GATEWAY_URL_MISSING_MESSAGE,
     };
     use crate::connection::SelfHostedProvider;
     use crate::settings::Settings;
     use otoa_input_core::{GateEvent, Readiness, SessionInput, SessionState};
     use otoa_input_protocol::{AsrCommand, AsrError, AsrEvent, AsrToken};
     use std::time::{Duration, Instant};
+    use url::Url;
 
     fn test_controller_with_failure(
         settings: Settings,
@@ -1694,6 +1744,39 @@ mod tests {
         let mut settings = Settings::default();
         update(&mut settings);
         settings
+    }
+
+    fn asr_token(text: &str, is_final: bool) -> AsrToken {
+        AsrToken {
+            text: text.to_string(),
+            start_ms: None,
+            end_ms: None,
+            confidence: None,
+            is_final,
+            speaker: None,
+            language: None,
+            translation_status: None,
+            source_language: None,
+        }
+    }
+
+    fn streaming_controller(
+        settings: Settings,
+    ) -> (Controller, crossbeam_channel::Receiver<AsrCommand>) {
+        let mut controller = test_controller(settings);
+        let (to_asr, asr_commands) = crossbeam_channel::unbounded();
+        controller.to_asr = Some(to_asr);
+        assert!(controller.session.apply(SessionInput::Enable));
+        assert!(controller.session.apply(SessionInput::SpeechStarted));
+        assert!(controller.session.apply(SessionInput::Connected));
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        (controller, asr_commands)
+    }
+
+    fn end_speech(controller: &mut Controller) {
+        assert_eq!(controller.gate.push(0.0), Some(GateEvent::SpeechEnded));
+        controller.handle_gate_event(GateEvent::SpeechEnded);
     }
 
     fn committed_overlay(controller: &Controller) -> (&str, &str) {
@@ -1859,9 +1942,9 @@ mod tests {
         });
         let mut controller = test_controller(settings);
 
-        controller.commit_segment(Some("確定テキスト".to_string()));
+        controller.commit_segment(Some("貼り付けテキスト".to_string()));
         let (committed, partial) = committed_overlay(&controller);
-        assert_eq!(committed, "確定テキスト");
+        assert_eq!(committed, "貼り付けテキスト");
         assert!(partial.is_empty());
 
         controller.committed_hold_until = Some(Instant::now() - Duration::from_millis(1));
@@ -1978,7 +2061,7 @@ mod tests {
         assert!(controller.session.apply(SessionInput::Enable));
         assert!(controller.session.apply(SessionInput::SpeechStarted));
         assert!(controller.session.apply(SessionInput::Connected));
-        controller.transcript.replace_partial("認識中");
+        controller.transcript.replace_partial("途中の文字");
 
         controller.refresh_overlay();
 
@@ -1987,7 +2070,7 @@ mod tests {
             OverlayView::Shown {
                 kind: OverlayKind::Recognizing,
                 committed: String::new(),
-                partial: "認識中".to_string(),
+                partial: "途中の文字".to_string(),
                 error: String::new(),
             }
         );
@@ -2017,8 +2100,8 @@ mod tests {
 
     #[test]
     fn speech_ended_in_client_mode_shows_finalizing_until_the_result_arrives() {
-        // 話し終えてから確定が返るまでオーバーレイを隠すと、認識が止まった
-        // ように見える。この区間は「認識中」を出し続ける。
+        // 話し終えてから結果が返るまでオーバーレイを隠すと、認識が止まった
+        // ように見える。この区間は「文字にしています」を出し続ける。
         let settings = settings_with(|settings| {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
@@ -2050,6 +2133,96 @@ mod tests {
     }
 
     #[test]
+    fn partial_after_finalize_is_ignored_until_next_speech() {
+        let settings = settings_with(|settings| {
+            settings.auto_paste = false;
+            settings.commit_hold_ms = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+        end_speech(&mut controller);
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+
+        controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("確定", true)]));
+        controller.handle_asr_event(AsrEvent::FinalizeDone);
+
+        assert!(controller.transcript.is_empty());
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+        assert_eq!(
+            controller
+                .last_commit
+                .as_ref()
+                .map(|(text, _)| text.as_str()),
+            Some("確定")
+        );
+
+        controller.handle_asr_event(AsrEvent::PartialText(vec![asr_token("あ", false)]));
+        assert!(controller.transcript.is_empty());
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+
+        controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("遅延", true)]));
+        assert!(controller.transcript.is_empty());
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+    }
+
+    #[test]
+    fn partial_after_next_speech_started_is_shown() {
+        let settings = settings_with(|settings| {
+            settings.auto_paste = false;
+            settings.commit_hold_ms = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+        end_speech(&mut controller);
+        controller.handle_asr_event(AsrEvent::FinalizeDone);
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        controller.handle_asr_event(AsrEvent::PartialText(vec![asr_token("次の", false)]));
+
+        assert_eq!(controller.transcript.partial(), "次の");
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Recognizing,
+                committed: String::new(),
+                partial: "次の".to_string(),
+                error: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn server_endpoint_mode_keeps_showing_partials() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.auto_paste = false;
+            settings.commit_hold_ms = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+        end_speech(&mut controller);
+
+        assert!(!controller.client_finalize_sent);
+        controller.handle_asr_event(AsrEvent::PartialText(vec![asr_token("サーバー", false)]));
+
+        assert_eq!(controller.transcript.partial(), "サーバー");
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Recognizing,
+                committed: String::new(),
+                partial: "サーバー".to_string(),
+                error: String::new(),
+            }
+        );
+    }
+
+    #[test]
     fn speech_endpoint_hides_overlay_when_commit_hold_is_zero() {
         let settings = settings_with(|settings| {
             settings.auto_paste = false;
@@ -2059,7 +2232,7 @@ mod tests {
         assert!(controller.session.apply(SessionInput::Enable));
         assert!(controller.session.apply(SessionInput::SpeechStarted));
         assert!(controller.session.apply(SessionInput::Connected));
-        controller.transcript.push_final("確定テキスト");
+        controller.transcript.push_final("貼り付けテキスト");
         controller.refresh_overlay();
 
         controller.handle_asr_event(AsrEvent::Endpoint);
@@ -2079,5 +2252,24 @@ mod tests {
 
         assert_eq!(controller.overlay, OverlayView::Hidden);
         assert!(controller.committed_hold_until.is_none());
+    }
+
+    #[test]
+    fn loopback_route_detection_accepts_local_urls() {
+        for url in [
+            "ws://127.0.0.1:8770/asr/v1",
+            "ws://localhost:8770/",
+            "ws://[::1]:8770/",
+        ] {
+            let parsed = Url::parse(url).expect("test URL should parse");
+            assert!(is_loopback_host(parsed.host_str().unwrap()), "{url}");
+        }
+    }
+
+    #[test]
+    fn loopback_route_detection_rejects_remote_urls() {
+        let parsed = Url::parse("wss://otoa-asr-gateway-xxx.a.run.app/ws/asr")
+            .expect("test URL should parse");
+        assert!(!is_loopback_host(parsed.host_str().unwrap()));
     }
 }

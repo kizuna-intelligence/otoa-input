@@ -70,11 +70,27 @@ WAV で書き出す。「先頭が欠ける」ような不具合で、欠けて�
 ごとに実装が違い、外部コマンド（Linux の `xdotool` / `wtype`）や権限
 （macOS のアクセシビリティ）に依存するので、そこだけ切り離して確認できる。
 
+UI の検証はホストで起動せず、`bash test-e2e/ui-preview.sh <state...>` で Docker から実行する。
+設定面は `settings:general` など、透過を含めるときは `--compositor` を付ける。
+出力先は `--out DIR` で指定し、`summary.txt` と PNG を確認する。
+
+## UI の約束事
+
+- 入力バーの `overlay_position=center` は作業領域ではなく画面全体の中央に置く。
+  `bottom` と `top` は X11 の作業領域を基準にする。Wayland ではウィンドウ位置の
+  指定が効かないことがある。
+- `overlay_transparent=auto` は X11 の `_NET_WM_CM_S0` にコンポジタの所有者が
+  いるかで透過を判定する。透過を使えない環境では不透過へフォールバックし、角丸の
+  外側を背景色で塗る。`on` は透過を要求し、`off` は常に不透過にする。
+- 見た目だけを確認するときは `--preview-overlay=<state>`、設定画面は
+  `--preview-settings=<general|mic|asr|advanced|account|about>` を使う。ホストで
+  起動せず、Docker の `bash test-e2e/ui-preview.sh` から撮影する。
+- トレイの待受状態・ツールチップ・メニュー文言は、Linux では自前ループから更新し、
+  Windows / macOS ではメインスレッドの UI 更新経路から更新する。コード上の更新経路は
+  共通だが、実機での表示確認は OS ごとに行う。
+
 ## プラットフォーム差
 
-- **トレイのログイン状態は Linux でしか更新されない。** Linux は自前の
-  イベントループを回しているが、Windows と macOS は `tray-icon` のハンドラに
-  任せていてループが無く、更新を差し込む先が無い
 - Windows のコンソールは日本語環境の既定が Shift-JIS なので、起動時に出力
   コードページを UTF-8 へ切り替えている
 
