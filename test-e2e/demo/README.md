@@ -10,7 +10,7 @@ Docker のクリーンな Ubuntu で、
 2. PulseAudio の null sink を作り、その monitor を**既定の入力**にする
    （これが仮想マイクになる）
 3. テキストエディタ（mousepad）を開いて前面にする
-4. AppImage を起動する。**ASR サーバーは自分で立ち上がる**
+4. ホストでビルドした ELF バイナリを起動する。**ASR サーバーは自分で立ち上がる**
 5. 用意した音声を `paplay` で仮想マイクへ流す
 6. `ffmpeg -f x11grab` で画面を録る
 
@@ -19,33 +19,47 @@ Docker のクリーンな Ubuntu で、
 **実際の録音を使わない。** 開発中の音声には出せない内容が混ざる。
 読み上げを合成して使う。
 
-```bash
-# 例: Cyborgy の tts API で作る
-ffmpeg -i 読み上げ.mp3 -ar 16000 -ac 1 -c:a pcm_s16le demo_speech.wav
-```
+`record.sh` が Open JTalk（日本語ボイスが使えない場合は `espeak-ng`）で日本語を
+合成し、`sox` で 16 kHz mono の WAV に変換する。実録音は使わない。Open JTalk では
+漢字を含む説明文をそのまま読ませ、eSpeak-ng のフォールバックでは発音用テキストを
+ひらがなにする。
+
+既定の読み上げは「音声入力のデモです」「話した内容がそのままカーソル位置に貼り付けられます」。
+2 文目は Open JTalk が「カーソルの位置」と発音する音声から助詞の区間だけを除き、
+認識結果が元の文になるようにしている。
 
 ## 撮る
 
 ```bash
-cd test-e2e/demo
-cp ../../dist/*.AppImage otoa-input.AppImage
-cp <用意した音声> demo_speech.wav
-docker build -t otoa-demo .
-chmod 777 .        # コンテナ側の利用者が書き戻せるように
-docker run --rm \
-  -v <HF キャッシュの models--reazon-research--reazonspeech-k2-v2>:/models-root:ro \
-  -v "$PWD":/host --entrypoint /bin/bash otoa-demo -c '
-    cp /host/otoa-input.AppImage /host/demo_speech.wav /host/record.sh /home/demo/
-    mkdir -p /home/demo/models
-    ln -sfn /models-root/snapshots/<sha> /home/demo/models/reazonspeech-k2-v2
-    bash /home/demo/record.sh && cp /home/demo/out.mp4 /host/'
+cd /home/yusuke/gitrepos/otoa-input
+cargo build --release -p otoa-input-app
+mkdir -p target/demo-recording
+chmod 777 target/demo-recording  # コンテナの demo ユーザーが書き戻せるようにする
+docker build -t otoa-demo -f test-e2e/demo/Dockerfile test-e2e/demo
+MODEL_DIR=$(readlink -f "$HOME/.local/share/otoa-input-oss/models/reazonspeech-k2-v2")
+MODEL_HUB=$(readlink -f "$MODEL_DIR/../..")
+docker run --rm --user demo \
+  -v "$PWD/target/release/otoa-input:/home/demo/otoa-input:ro" \
+  -v "$MODEL_DIR:/home/demo/.local/share/otoa-input-oss/models/reazonspeech-k2-v2:ro" \
+  -v "$MODEL_HUB/blobs:/home/demo/.local/share/otoa-input-oss/blobs:ro" \
+  -v "$PWD/test-e2e/demo:/host-demo:ro" \
+  -v "$PWD/target/demo-recording:/host" \
+  --entrypoint /bin/bash otoa-demo -c \
+  'cp /host-demo/record.sh /home/demo/record.sh && \
+   DEMO_COMPOSITOR=0 bash /home/demo/record.sh && \
+   cp /home/demo/out.mp4 /home/demo/final.png /home/demo/first.txt /home/demo/mousepad.txt /home/demo/app.log /host/'
 ```
+
+バイナリはホストでビルドするが、**UI と ASR サーバーの起動は Docker 内だけ**で行う。
+`DEMO_COMPOSITOR=0` は不透過フォールバック、`DEMO_COMPOSITOR=1` は `xcompmgr` を
+使う透過表示である。Xvfb では透過ウィンドウが Mousepad の上に描画されないことが
+あるため、成果物の録画には不透過フォールバックを使う。
 
 ## GIF にする
 
 ```bash
-# 黒帯を落とす（数値は画面サイズに合わせる）
-ffmpeg -i out.mp4 -vf "crop=642:505:179:55" cropped.mp4
+# Mousepad の窓（20,60 に置いた 960x480）だけを残す
+ffmpeg -i out.mp4 -vf "crop=960:480:20:60" cropped.mp4
 ffmpeg -i cropped.mp4 -vf "fps=10,scale=720:-1:flags=lanczos,palettegen=stats_mode=diff" palette.png
 ffmpeg -i cropped.mp4 -i palette.png \
   -lavfi "fps=10,scale=720:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3" \
