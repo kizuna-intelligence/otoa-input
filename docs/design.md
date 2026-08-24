@@ -66,9 +66,19 @@ ONNX Runtime は静的リンクし、Silero VAD モデルはバイナリへ埋�
 WAV で書き出す。「先頭が欠ける」ような不具合で、欠けているのが届いた音声なのか
 認識結果だけなのかを切り分けられる。
 
-`otoa-input --paste-test [文字列]` は貼り付けだけを 1 回試す。貼り付けは OS
-ごとに実装が違い、外部コマンド（Linux の `xdotool` / `wtype`）や権限
-（macOS のアクセシビリティ）に依存するので、そこだけ切り離して確認できる。
+`otoa-input --paste-test [文字列]` は本文を CLIPBOARD と PRIMARY に置き、既定の
+`Shift+Insert` を送って状態をログへ出す診断である。貼り付けは OS ごとに実装が違い、
+外部コマンド（Linux の `xdotool` / `wtype`）や権限（macOS のアクセシビリティ）に
+依存するので、そこだけ切り離して確認できる。
+
+## 貼り付け経路
+
+Linux では宛先のウィンドウやプロセスを調べず、X11 と Wayland のどちらでも
+CLIPBOARD と PRIMARY に同じ本文を置いて `Shift+Insert` を送る。X11 では貼り付け前の
+PRIMARY を控え、既定では 150ms 後に元へ戻す。`paste_shortcut` に `ctrl-v`、
+`ctrl-shift-v`、`shift-insert` を指定すると、`auto` の既定送出を手動で上書きできる。
+Wayland の貼り付け動作は未実測であり、問題がある場合は `paste_shortcut=ctrl-v` を
+逃げ道として使う。
 
 UI の検証はホストで起動せず、`bash test-e2e/ui-preview.sh <state...>` で Docker から実行する。
 設定面は `settings:general` など、透過を含めるときは `--compositor` を付ける。

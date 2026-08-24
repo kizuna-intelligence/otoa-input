@@ -70,7 +70,8 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
                       詳細は otoa-input --serve --help
   --check-connection  接続先へ繋いで結果を表示し、終了する
   --paste-test [文字列]
-                      貼り付けだけを 1 回試して終了する。
+                      本文を CLIPBOARD/PRIMARY に置き、既定の Shift+Insert
+                      で 1 回貼り付けて状態をログへ出して終了する。
                       文字を入れたい場所にカーソルを置いてから実行する
   --preview-overlay=<状態>
                       音声・接続なしで入力バーを表示する。
@@ -117,7 +118,7 @@ fn run_server(arguments: &[String]) -> anyhow::Result<()> {
     runtime.block_on(otoa_asr_server::run(config))
 }
 
-/// 貼り付けだけを 1 回試す。
+/// 本文を置いて既定の貼り付けを 1 回試し、状態をログへ出す。
 ///
 /// 貼り付けは OS ごとに実装が違い、外部コマンド（Linux の xdotool / wtype）や
 /// 権限（macOS のアクセシビリティ）に依存する。認識まで動いても貼り付けだけ
@@ -130,7 +131,6 @@ fn paste_test(text: &str) -> i32 {
             return 2;
         }
     };
-    output.poll_paste_target();
     match output.emit(text, PasteMethod::ClipboardAndPaste) {
         Ok(()) => {
             println!(

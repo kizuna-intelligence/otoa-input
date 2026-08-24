@@ -1,5 +1,9 @@
 use std::fmt;
 
+fn default_restore_primary_selection() -> bool {
+    true
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayPosition {
     Bottom,
@@ -12,6 +16,25 @@ pub enum OverlayTransparency {
     Auto,
     On,
     Off,
+}
+
+/// 貼り付けに使うキー。
+///
+/// `auto` は宛先の判定を行わず、常に `Shift+Insert` を使う。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PasteShortcutSetting {
+    #[default]
+    Auto,
+    /// 常に `Ctrl+V` を使う手動指定。
+    #[serde(alias = "ctrl_v")]
+    CtrlV,
+    /// 常に `Ctrl+Shift+V` を使う手動指定。
+    #[serde(alias = "ctrl_shift_v")]
+    CtrlShiftV,
+    /// 常に `Shift+Insert` を使う手動指定。
+    #[serde(alias = "shift_insert")]
+    ShiftInsert,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -70,6 +93,12 @@ pub struct Settings {
     pub auto_paste: bool,
     /// 発話区切り（`<end>`）ごとに貼り付けるか。false なら停止時に一括。
     pub paste_per_endpoint: bool,
+    /// 貼り付けキー。`auto` は常に `Shift+Insert`、それ以外は手動指定。
+    #[serde(default)]
+    pub paste_shortcut: PasteShortcutSetting,
+    /// 貼り付け後に PRIMARY を元の内容へ戻すか。
+    #[serde(default = "default_restore_primary_selection")]
+    pub restore_primary_selection: bool,
     /// 確定テキストをオーバーレイに保持する時間（ミリ秒）。0 なら即時非表示。
     pub commit_hold_ms: u32,
     /// スプラッシュを表示する時間（ミリ秒）。
@@ -104,6 +133,8 @@ impl fmt::Debug for Settings {
             .field("microphone", &self.microphone)
             .field("auto_paste", &self.auto_paste)
             .field("paste_per_endpoint", &self.paste_per_endpoint)
+            .field("paste_shortcut", &self.paste_shortcut)
+            .field("restore_primary_selection", &self.restore_primary_selection)
             .field("commit_hold_ms", &self.commit_hold_ms)
             .field("splash_ms", &self.splash_ms)
             .field("overlay_position", &self.overlay_position)
@@ -134,6 +165,8 @@ impl Default for Settings {
             microphone: String::new(),
             auto_paste: true,
             paste_per_endpoint: true,
+            paste_shortcut: PasteShortcutSetting::Auto,
+            restore_primary_selection: true,
             commit_hold_ms: 900,
             splash_ms: 2500,
             overlay_position: "center".to_string(),
@@ -173,7 +206,7 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{PasteShortcutSetting, Settings};
     use std::sync::{Mutex, PoisonError};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -191,6 +224,8 @@ mod tests {
         assert_eq!(settings.idle_close_sec, 15);
         assert!(settings.auto_paste);
         assert!(settings.paste_per_endpoint);
+        assert_eq!(settings.paste_shortcut, PasteShortcutSetting::Auto);
+        assert!(settings.restore_primary_selection);
         assert_eq!(settings.commit_hold_ms, 900);
         assert_eq!(settings.splash_ms, 2500);
         assert_eq!(settings.overlay_position, "center");
@@ -221,6 +256,8 @@ mod tests {
         assert_eq!(settings.vad_threshold, Settings::default().vad_threshold);
         assert_eq!(settings.input_gain, Settings::default().input_gain);
         assert_eq!(settings.auto_paste, Settings::default().auto_paste);
+        assert_eq!(settings.paste_shortcut, PasteShortcutSetting::Auto);
+        assert!(settings.restore_primary_selection);
         assert_eq!(settings.commit_hold_ms, 900);
         assert_eq!(settings.splash_ms, 2500);
         assert_eq!(settings.overlay_position, "center");
@@ -292,5 +329,51 @@ mod tests {
         assert_eq!(saved["overlay_position"], "top");
         assert_eq!(saved["overlay_transparent"], "off");
         assert_eq!(saved["reduce_motion"], true);
+    }
+
+    #[test]
+    fn paste_shortcut_values_round_trip_and_read_legacy_names() {
+        let cases = [
+            ("auto", PasteShortcutSetting::Auto),
+            ("ctrl-v", PasteShortcutSetting::CtrlV),
+            ("ctrl-shift-v", PasteShortcutSetting::CtrlShiftV),
+            ("shift-insert", PasteShortcutSetting::ShiftInsert),
+        ];
+        for (serialized, expected) in cases {
+            let settings: Settings =
+                serde_json::from_str(&format!(r#"{{"paste_shortcut":"{serialized}"}}"#))
+                    .expect("paste shortcut should deserialize");
+            assert_eq!(settings.paste_shortcut, expected);
+            let saved = serde_json::to_value(&settings).expect("settings should serialize");
+            assert_eq!(saved["paste_shortcut"], serialized);
+        }
+
+        for (serialized, expected) in [
+            ("ctrl_v", PasteShortcutSetting::CtrlV),
+            ("ctrl_shift_v", PasteShortcutSetting::CtrlShiftV),
+            ("shift_insert", PasteShortcutSetting::ShiftInsert),
+        ] {
+            let settings: Settings =
+                serde_json::from_str(&format!(r#"{{"paste_shortcut":"{serialized}"}}"#))
+                    .expect("legacy paste shortcut should deserialize");
+            assert_eq!(settings.paste_shortcut, expected);
+        }
+    }
+
+    #[test]
+    fn removed_terminal_window_classes_are_ignored() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+                "paste_shortcut":"ctrl-shift-v",
+                "terminal_window_classes":["old-terminal"],
+                "restore_primary_selection":false
+            }"#,
+        )
+        .expect("removed setting should not break deserialization");
+        assert_eq!(settings.paste_shortcut, PasteShortcutSetting::CtrlShiftV);
+        assert!(!settings.restore_primary_selection);
+
+        let saved = serde_json::to_value(&settings).expect("settings should serialize");
+        assert!(saved.get("terminal_window_classes").is_none());
     }
 }

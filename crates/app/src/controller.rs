@@ -2,10 +2,10 @@ use crate::settings::Settings;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use otoa_input_core::Account;
 use otoa_input_core::{
-    ConnectionProvider, GateEvent, PreRoll, Readiness, Session, SessionInput, SessionState,
-    SpeechGate, Transcript,
+    ConnectionProvider, GateEvent, PasteShortcutSetting, PreRoll, Readiness, Session, SessionInput,
+    SessionState, SpeechGate, Transcript,
 };
-use otoa_input_platform::{AudioCapture, AudioFrame, PasteMethod, TextOutput};
+use otoa_input_platform::{AudioCapture, AudioFrame, PasteMethod, PasteShortcut, TextOutput};
 use otoa_input_protocol::{
     AsrCommand, AsrConfig, AsrError, AsrEvent, AsrSession, AsrToken, EndpointTuning,
 };
@@ -32,6 +32,21 @@ const CONNECTING_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSING_TIMEOUT: Duration = Duration::from_secs(8);
 const GATEWAY_URL_MISSING_MESSAGE: &str =
     "ゲートウェイURLが設定されていません。設定画面の「詳細」で指定してください。";
+
+fn configure_text_output(text_out: &mut TextOutput, settings: &Settings) {
+    text_out.set_paste_shortcut(resolve_paste_shortcut(settings.paste_shortcut));
+    text_out.set_restore_primary_selection(settings.restore_primary_selection);
+}
+
+fn resolve_paste_shortcut(setting: PasteShortcutSetting) -> PasteShortcut {
+    match setting {
+        PasteShortcutSetting::Auto | PasteShortcutSetting::ShiftInsert => {
+            PasteShortcut::ShiftInsert
+        }
+        PasteShortcutSetting::CtrlV => PasteShortcut::CtrlV,
+        PasteShortcutSetting::CtrlShiftV => PasteShortcut::CtrlShiftV,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverlayView {
@@ -209,6 +224,8 @@ impl Controller {
     ) -> anyhow::Result<Self> {
         let gate = gate_from_settings(&settings);
         let preroll = PreRoll::new(milliseconds_to_samples(settings.preroll_ms));
+        let mut text_out = TextOutput::new()?;
+        configure_text_output(&mut text_out, &settings);
         Ok(Self {
             session: Session::new(),
             transcript: Transcript::new(),
@@ -216,7 +233,7 @@ impl Controller {
             pending_audio: Vec::new(),
             to_asr: None,
             to_ui,
-            text_out: TextOutput::new()?,
+            text_out,
             overlay: OverlayView::Splash,
             overlay_error_until: None,
             splash_started_at: Some(Instant::now()),
@@ -536,6 +553,7 @@ impl Controller {
 
     fn update_settings(&mut self, settings: Settings) {
         let microphone_changed = self.settings.microphone != settings.microphone;
+        configure_text_output(&mut self.text_out, &settings);
         let product_settings = settings.product_settings_value();
         self.provider
             .update_settings(&settings.core, product_settings.as_ref());
@@ -968,7 +986,6 @@ impl Controller {
     }
 
     fn periodic(&mut self) {
-        self.text_out.poll_paste_target();
         self.log_audio_progress();
         self.prune_level_window(Instant::now());
         let status = level_status(
@@ -1492,6 +1509,7 @@ impl Controller {
             return;
         };
         let was_enabled = self.settings.listening_enabled;
+        configure_text_output(&mut self.text_out, &settings);
         self.settings = settings;
         self.rebuild_vad_configuration();
         if was_enabled && !self.settings.listening_enabled {
@@ -1664,13 +1682,13 @@ fn is_loopback_host(host: &str) -> bool {
 mod tests {
     use super::{
         apply_input_gain, combine_readiness, failed_retry_is_due, is_loopback_host,
-        is_nonfatal_asr_error, level_status, next_failed_retry_delay, Controller, LevelStatus,
-        OverlayKind, OverlayView, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
+        is_nonfatal_asr_error, level_status, next_failed_retry_delay, resolve_paste_shortcut,
+        Controller, LevelStatus, OverlayKind, OverlayView, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
         GATEWAY_URL_MISSING_MESSAGE,
     };
     use crate::connection::SelfHostedProvider;
     use crate::settings::Settings;
-    use otoa_input_core::{GateEvent, Readiness, SessionInput, SessionState};
+    use otoa_input_core::{GateEvent, PasteShortcutSetting, Readiness, SessionInput, SessionState};
     use otoa_input_protocol::{AsrCommand, AsrError, AsrEvent, AsrToken};
     use std::time::{Duration, Instant};
     use url::Url;
@@ -1698,6 +1716,14 @@ mod tests {
 
     fn test_controller(settings: Settings) -> Controller {
         test_controller_with_failure(settings, None)
+    }
+
+    #[test]
+    fn auto_paste_shortcut_resolves_to_shift_insert() {
+        assert_eq!(
+            resolve_paste_shortcut(PasteShortcutSetting::Auto),
+            otoa_input_platform::PasteShortcut::ShiftInsert
+        );
     }
 
     #[test]
