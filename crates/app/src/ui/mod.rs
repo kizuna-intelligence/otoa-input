@@ -58,6 +58,7 @@ pub fn run(
     ui_updates: Receiver<UiUpdate>,
     runtime: Runtime,
     settings_view_override: Option<crate::SettingsView>,
+    extra_settings_page: Option<crate::ExtraSettingsPage>,
 ) -> anyhow::Result<()> {
     let open_settings_on_start = runtime.is_settings_preview();
     let settings_preview_page = runtime
@@ -105,6 +106,7 @@ pub fn run(
     let tray_signal = create_signal_from_channel(tray_events);
     let settings_commands = runtime.commands.clone();
     let settings_view_for_tray = settings_view_override.clone();
+    let extra_for_tray = extra_settings_page.clone();
     create_effect(move |_| {
         let Some(action) = tray_signal.get() else {
             return;
@@ -116,6 +118,7 @@ pub fn run(
                     settings_commands.clone(),
                     SettingsPage::General,
                     settings_view_for_tray.clone(),
+                    extra_for_tray.clone(),
                 );
             }
             tray::TrayAction::Quit => quit_app(),
@@ -149,6 +152,7 @@ pub fn run(
             runtime.commands.clone(),
             settings_preview_page,
             settings_view_override.clone(),
+            extra_settings_page.clone(),
         );
     }
     app.run();
@@ -162,6 +166,7 @@ pub(crate) fn open_settings_window(
     commands: Sender<ControllerCommand>,
     initial_page: SettingsPage,
     settings_view_override: Option<crate::SettingsView>,
+    extra_settings_page: Option<crate::ExtraSettingsPage>,
 ) {
     if state.settings_window_open.get_untracked() {
         return;
@@ -179,6 +184,7 @@ pub(crate) fn open_settings_window(
                 commands,
                 window_id,
                 initial_page,
+                extra_settings_page,
             )),
         },
         Some(

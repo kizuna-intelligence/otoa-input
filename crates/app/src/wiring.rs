@@ -23,11 +23,18 @@ pub enum PreviewScenario {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SettingsPage {
+pub enum SettingsPage {
     General,
     Microphone,
     Recognition,
     Advanced,
+    /// 配布ごとの面。中身は [`crate::Deps::extra_settings_page`] が出す。
+    ///
+    /// 面を 1 つ渡せる形にしたのは、別ウィンドウにすると
+    /// 「設定を閉じたつもりでアプリが終わる」ことになり、
+    /// 欄ごとに差し込み口を作ると欄の種類だけ口が増えるからである。
+    /// レールも枠も公開版が描くので、見た目は勝手に揃う。
+    Extra,
     Account,
     About,
 }
@@ -35,6 +42,7 @@ pub(crate) enum SettingsPage {
 impl SettingsPage {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
+            "extra" => Some(Self::Extra),
             "general" => Some(Self::General),
             "mic" => Some(Self::Microphone),
             "asr" => Some(Self::Recognition),

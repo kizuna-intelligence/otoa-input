@@ -82,6 +82,7 @@ pub fn view(
     commands: Sender<ControllerCommand>,
     window_id: WindowId,
     initial_page: SettingsPage,
+    extra: Option<crate::ExtraSettingsPage>,
 ) -> impl IntoView {
     let server_url = RwSignal::new(settings.server_url.clone());
     let language = RwSignal::new(language_label(&settings.language_hints));
@@ -248,11 +249,14 @@ pub fn view(
         }
     };
 
-    let rail = rail_view(page, state);
+    let extra_label = extra.as_ref().map(|page| page.label);
+    let extra_for_pages = extra.map(|page| std::sync::Arc::new(page));
+    let rail = rail_view(page, state, extra_label);
     let pages = dyn_container(
         move || page.get(),
         move |selected_page| {
             page_view(
+                extra_for_pages.clone(),
                 selected_page,
                 form,
                 state,
@@ -366,12 +370,21 @@ pub fn view(
     })
 }
 
-fn rail_view(page: RwSignal<SettingsPage>, state: UiState) -> impl IntoView {
+fn rail_view(
+    page: RwSignal<SettingsPage>,
+    state: UiState,
+    extra_label: Option<&'static str>,
+) -> impl IntoView {
     let mut items = vec![
         rail_item(page, SettingsPage::General, "一般", GEAR_ICON),
         rail_item(page, SettingsPage::Microphone, "マイク", MIC_ICON),
         rail_item(page, SettingsPage::Recognition, "認識", WAVE_ICON),
         rail_item(page, SettingsPage::Advanced, "詳細", SLIDERS_ICON),
+        // 配布ごとの面。無ければ出さない。
+        match extra_label {
+            Some(text) => rail_item(page, SettingsPage::Extra, text, SLIDERS_ICON),
+            None => empty().into_any(),
+        },
     ];
     if state.account_settings_available {
         items.push(rail_item(
@@ -458,6 +471,7 @@ fn rail_item(
 }
 
 fn page_view(
+    extra: Option<std::sync::Arc<crate::ExtraSettingsPage>>,
     page: SettingsPage,
     form: FormState,
     state: UiState,
@@ -470,6 +484,10 @@ fn page_view(
         SettingsPage::Microphone => microphone_page(form, state, smooth_level).into_any(),
         SettingsPage::Recognition => recognition_page(form).into_any(),
         SettingsPage::Advanced => advanced_page(form).into_any(),
+        SettingsPage::Extra => match extra {
+            Some(entry) => (entry.build)(settings.clone(), state, commands.clone()),
+            None => empty().into_any(),
+        },
         SettingsPage::Account => account_page(state, commands).into_any(),
         SettingsPage::About => about_page(form, state, settings).into_any(),
     }

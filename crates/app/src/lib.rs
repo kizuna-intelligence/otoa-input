@@ -37,6 +37,16 @@ pub use settings::Settings;
 /// 受け取るものは公開版の設定画面と同じで、返すのは画面そのものである。
 /// 公開版の [`ui::settings_view::view`] を自分で呼べるので、
 /// **公開版の画面を土台にして自分の欄を足す**形が取れる。
+/// 設定画面に足す、配布ごとの面。
+///
+/// 返すのは面の中身だけでよい。レール（左の項目）も枠も公開版が描くので、
+/// 見た目は自動で揃う。`label` はレールに出す名前。
+#[derive(Clone)]
+pub struct ExtraSettingsPage {
+    pub label: &'static str,
+    pub build: Arc<dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>) -> floem::AnyView + Send + Sync>,
+}
+
 pub type SettingsView = Arc<
     dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>, WindowId) -> floem::AnyView
         + Send
@@ -55,6 +65,12 @@ pub struct Deps {
     /// [`ConnectionProvider::prepare`] が `None` を返す実装では、
     /// ログイン関係の UI（トレイの項目、設定画面のアカウント欄）は出ない。
     pub provider: Arc<dyn ConnectionProvider>,
+    /// 設定画面に足す面。`None` なら足さない。
+    ///
+    /// 画面ごと差し替える [`Deps::settings_view`] と違い、こちらは
+    /// 公開版の画面をそのまま使ったまま、面を 1 つ増やす。
+    /// ふつうはこちらで足りる。
+    pub extra_settings_page: Option<ExtraSettingsPage>,
     /// 設定画面。`None` なら公開版のものを使う。
     ///
     /// 設定画面に欄を 1 つ足すためだけに個別の差し込み口を並べると、
@@ -69,6 +85,7 @@ impl Deps {
         Self {
             provider,
             settings_view: None,
+            extra_settings_page: None,
         }
     }
 }
@@ -214,7 +231,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         let settings = load_settings()?;
         let (to_ui, ui_updates) = unbounded_channel();
         let runtime = wiring::start_preview(settings.clone(), scenario, to_ui)?;
-        return ui::run(settings, ui_updates, runtime, deps.settings_view);
+        return ui::run(settings, ui_updates, runtime, deps.settings_view, deps.extra_settings_page);
     }
 
     if let Some(argument) = arguments
@@ -236,7 +253,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             wiring::PreviewScenario::Settings(page),
             to_ui,
         )?;
-        return ui::run(settings, ui_updates, runtime, deps.settings_view);
+        return ui::run(settings, ui_updates, runtime, deps.settings_view, deps.extra_settings_page);
     }
 
     if let Some(index) = arguments
@@ -319,7 +336,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         to_ui,
         account_settings_available,
     )?;
-    ui::run(settings, ui_updates, runtime, deps.settings_view)
+    ui::run(settings, ui_updates, runtime, deps.settings_view, deps.extra_settings_page)
 }
 
 #[cfg(test)]
