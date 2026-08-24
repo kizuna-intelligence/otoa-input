@@ -28,4 +28,4 @@ pub fn compositor_available() -> bool {
 }
 pub use paths::{data_directory, set_app_directory, settings_path};
 pub use resample::Resampler;
-pub use textout::{PasteMethod, TextOutput};
+pub use textout::{PasteMethod, PasteShortcut, TextOutput};

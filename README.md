@@ -131,11 +131,23 @@ sudo apt install \
 - AppImage を FUSE 無しで動かす場合は `./otoa-input-*.AppImage --appimage-extract`
   で展開し、`squashfs-root/AppRun` を実行してください
 
+### 貼り付け方式
+
+Linux の X11 と Wayland では、本文を CLIPBOARD と PRIMARY の両方へ置いてから
+`Shift+Insert` を送ります。既定の `paste_shortcut=auto` は宛先の名前を調べず、
+常にこの方式を使います。PRIMARY は貼り付け前の内容を控え、既定では 150ms 後に
+元へ戻します（`restore_primary_selection=false` で無効化できます）。
+
+環境により `Shift+Insert` が使えない場合の手動の逃げ道として、設定の
+`paste_shortcut` に `ctrl-v`、`ctrl-shift-v`、`shift-insert` を指定できます。
+Wayland の貼り付け動作はまだ実測していません。うまくいかない場合は
+`paste_shortcut=ctrl-v` を試してください。
+
 ## うまくいかないとき
 
 ```bash
 ./otoa-input --check-connection   # 認識サーバーへ繋がるか
-./otoa-input --paste-test         # 貼り付けだけを試す
+./otoa-input --paste-test         # 本文を置いて Shift+Insert を送り、状態を記録する
 ./otoa-input --help               # オプション一覧
 ./otoa-input --preview-overlay=listening  # 入力バーを確認する
 ./otoa-input --preview-settings=general   # 設定画面を確認する
