@@ -83,10 +83,28 @@ case "$OS" in
         ;;
 esac
 
+# **最初に読まれる文なので、実際のふるまいとずれていると効く。**
+# 0.3.0 でモデルは初回起動時に自分で落ちてくるようになった。手で取る手順を
+# 1 番目に置いたままだと、要らない 587MB の取得を利用者にさせることになる。
 cat > "$STAGE/はじめに.txt" <<EOF
 Otoa Input $VERSION ($OS/$ARCH)
 
-1. 認識モデルを取得する（同梱していない）
+1. 起動する
+
+   $LAUNCH
+
+   認識モデル（数百 MB）は同梱していませんが、**初回起動時に自動で
+   落ちてきます。** 進み具合は入力バーに出ます。落とし終えるまで認識は
+   始まりません。回線によっては数分かかります。途中で終了しても、次の
+   起動で残りだけを取り直します。
+
+   ASR サーバーは必要なときに自分で立ち上がります。別で起動する必要は
+   ありません。別の機械でサーバーだけ動かしたい場合は otoa-asr-server
+   （または otoa-input --serve）を使ってください。
+
+$PLATFORM_NOTE
+
+2. 自分でモデルを置きたい場合（回線が細い、複数台へ配る、など）
 
    精度を優先するなら ReazonSpeech k2-v2（587MB、既定）:
 
@@ -104,16 +122,7 @@ Otoa Input $VERSION ($OS/$ARCH)
    models/kodama-ja-streaming-small/ に置き、設定画面の「認識エンジン」で
    kodama を選びます。.onnx.data を忘れると読み込みに失敗します。
 
-2. 起動する
-
-   $LAUNCH
-
-   ASR サーバーは必要なときに自分で立ち上がります。別で起動する必要は
-   ありません。別の機械でサーバーだけ動かしたい場合は otoa-asr-server
-   （または otoa-input --serve）を使ってください。
-
-$PLATFORM_NOTE
-
+この配布物の版: $VERSION（$LAUNCH --version でも確かめられます）
 詳細は README.md、オプションは --help を見てください。
 EOF
 
@@ -154,17 +163,12 @@ if [ "$OS" = windows ]; then
         POWERSHELL="$(command -v powershell.exe || command -v pwsh.exe || true)"
         [ -n "$POWERSHELL" ] || POWERSHELL="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
         [ -x "$POWERSHELL" ] || { echo "zip も PowerShell も使えない" >&2; exit 1; }
-        # **Compress-Archive を使わない。** 区切りをバックスラッシュで書き、
-        # 日本語のファイル名を UTF-8 のフラグ無しで格納するので、
-        # 他の OS で展開すると「はじめに.txt」が化ける（0.1.4 で実際に化けた）。
-        # .NET の ZipFile に UTF-8 を明示すると、区切りも名前も正しくなる。
-        "$POWERSHELL" -NoProfile -Command \
-            "Add-Type -AssemblyName System.IO.Compression.FileSystem; \
-             [System.IO.Compression.ZipFile]::CreateFromDirectory( \
-               (Resolve-Path '$NAME').Path, \
-               (Join-Path (Get-Location).Path '$NAME.zip'), \
-               [System.IO.Compression.CompressionLevel]::Optimal, \
-               \$true, [System.Text.Encoding]::UTF8)"
+        # 中身は zip-windows.ps1 側に書いてある。**ここへ直に PowerShell を
+        # 書かない。** bash と cmd と PowerShell の引用符が三重にかかり、
+        # 直すたびに壊れる。
+        "$POWERSHELL" -NoProfile -ExecutionPolicy Bypass \
+            -File "$(cygpath -w "$ROOT/scripts/zip-windows.ps1")" \
+            -SourceDir "$NAME" -Destination "$(cygpath -w "$OUT/$NAME.zip")"
     fi
     ARCHIVE="$NAME.zip"
 else
@@ -172,14 +176,15 @@ else
 fi
 # **書庫の中の名前を検査する。** 化けたまま配ると、利用者には
 # 「уБпуБШуВБуБл.txt」のような名前で届く（0.1.4 で実際に起きた）。
-if [ "$OS" = windows ] && command -v unzip >/dev/null; then
-    if unzip -l "$ARCHIVE" | grep -q '\\'; then
-        echo "zip の中でパス区切りがバックスラッシュになっている" >&2
-        exit 1
-    fi
-    if ! unzip -l "$ARCHIVE" | grep -q 'はじめに\.txt'; then
-        echo "zip の中の日本語ファイル名が壊れている" >&2
-        unzip -l "$ARCHIVE" >&2
+#
+# **unzip -l の表示では判定しない。** Info-ZIP は名前を端末の文字コードへ
+# 直して出すので、正しく入っていても化けて見える（この検査自体が誤って
+# 落ちた）。書庫の生バイトに UTF-8 の「はじめに」が居ることを見る。
+# PowerShell で作った場合は、UTF-8 フラグまで zip-windows.ps1 側で
+# 読み直して確かめている。
+if [ "$OS" = windows ]; then
+    if ! grep -qa "$(printf '\xe3\x81\xaf\xe3\x81\x98\xe3\x82\x81\xe3\x81\xab')" "$ARCHIVE"; then
+        echo "zip の中の日本語ファイル名が UTF-8 で入っていない" >&2
         exit 1
     fi
 fi
