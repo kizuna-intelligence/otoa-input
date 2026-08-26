@@ -579,6 +579,17 @@ fn transcript_content(state: UiState, motion: RwSignal<MotionFrame>) -> impl Int
             )
         },
         move |(mode, committed, partial, error, reduce_motion)| match mode {
+            // ダウンロードの進み具合は committed に載せて渡ってくる。
+            OverlayMode::Shown(OverlayKind::Preparing) => text(committed.clone())
+                .style(|style| {
+                    text_style(
+                        style,
+                        theme::text::CAPTION,
+                        theme::text::CAPTION_WEIGHT,
+                        theme::color::INK,
+                    )
+                })
+                .into_any(),
             OverlayMode::Shown(OverlayKind::Error | OverlayKind::Notice) => {
                 text(display_error(&error))
                     .style(|style| {
@@ -924,7 +935,10 @@ fn eq_bar(state: UiState, motion: RwSignal<MotionFrame>, index: usize, base: f64
             OverlayMode::Shown(OverlayKind::Recognizing) => motion.get().eq_heights[index],
             OverlayMode::Shown(OverlayKind::Committed) => base * 0.35,
             OverlayMode::Shown(
-                OverlayKind::Error | OverlayKind::Notice | OverlayKind::LoginNeeded,
+                OverlayKind::Preparing
+                | OverlayKind::Error
+                | OverlayKind::Notice
+                | OverlayKind::LoginNeeded,
             )
             | OverlayMode::Hidden
             | OverlayMode::Splash => 0.0,
@@ -981,7 +995,10 @@ fn eq_heights(mode: OverlayMode, reduce_motion: bool, smooth_level: f64, elapsed
             }
             OverlayMode::Shown(OverlayKind::Committed) => (base * 0.35).round(),
             OverlayMode::Shown(
-                OverlayKind::Error | OverlayKind::Notice | OverlayKind::LoginNeeded,
+                OverlayKind::Preparing
+                | OverlayKind::Error
+                | OverlayKind::Notice
+                | OverlayKind::LoginNeeded,
             )
             | OverlayMode::Hidden
             | OverlayMode::Splash => 0.0,
@@ -1022,7 +1039,10 @@ fn text_style(style: Style, size: f32, weight: floem::text::Weight, color: Color
 fn orb_brush(mode: OverlayMode) -> Brush {
     match mode {
         OverlayMode::Shown(
-            OverlayKind::WarmingUp | OverlayKind::Connecting | OverlayKind::StartingServer,
+            OverlayKind::Preparing
+            | OverlayKind::WarmingUp
+            | OverlayKind::Connecting
+            | OverlayKind::StartingServer,
         ) => theme::color::BRAND_2.into(),
         OverlayMode::Shown(OverlayKind::Error) => theme::color::ERROR.into(),
         OverlayMode::Shown(OverlayKind::Notice) => theme::color::AMBER.into(),
@@ -1042,9 +1062,10 @@ fn overlay_kind_color(mode: OverlayMode) -> Color {
         return theme::color::NAVY_SOFT;
     };
     match kind {
-        OverlayKind::WarmingUp | OverlayKind::Connecting | OverlayKind::StartingServer => {
-            theme::color::AMBER
-        }
+        OverlayKind::Preparing
+        | OverlayKind::WarmingUp
+        | OverlayKind::Connecting
+        | OverlayKind::StartingServer => theme::color::AMBER,
         OverlayKind::Recognizing => theme::color::BRAND,
         OverlayKind::Finalizing | OverlayKind::WaitingForResponse => theme::color::CYAN,
         OverlayKind::Committed => theme::color::BRAND,
@@ -1078,6 +1099,7 @@ fn overlay_status_text(mode: OverlayMode, auto_paste: bool) -> &'static str {
         return "";
     };
     match kind {
+        OverlayKind::Preparing => "準備しています",
         OverlayKind::WarmingUp => WARMUP_TITLE,
         OverlayKind::Connecting => "つないでいます",
         OverlayKind::Recognizing => "聞いています",
@@ -1102,6 +1124,7 @@ fn overlay_summary(mode: OverlayMode) -> &'static str {
         OverlayMode::Hidden => "hidden",
         OverlayMode::Splash => "splash",
         OverlayMode::Shown(kind) => match kind {
+            OverlayKind::Preparing => "preparing",
             OverlayKind::WarmingUp => "warming-up",
             OverlayKind::Connecting => "connecting",
             OverlayKind::Recognizing => "recognizing",

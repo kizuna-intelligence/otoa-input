@@ -1,3 +1,4 @@
+use crate::bundled_server;
 use crate::settings::Settings;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use otoa_input_core::Account;
@@ -73,6 +74,8 @@ pub enum OverlayView {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OverlayKind {
+    /// 認識モデルを自動ダウンロード中。進捗の文言は `committed` に載せる。
+    Preparing,
     /// 認識器を起こし、参照音声を登録している。発話は受け付けない。
     WarmingUp,
     Connecting,
@@ -580,6 +583,17 @@ impl Controller {
         self.send_login_state();
         self.send_route_update();
         self.render_overlay();
+        // 同梱サーバーを立てる。モデルが無ければ自動で落とすので、ここで
+        // 数分かかることがある。進捗はオーバーレイに出す。
+        self.bootstrap_bundled_server();
+        // **貼り付けの権限は起動時に確かめる。** ここで聞いておかないと、
+        // 最初に喋った瞬間に初めて許可を求められることになる。
+        if self.settings.auto_paste {
+            if let Some(reason) = self.text_out.check_paste_permission() {
+                tracing::warn!(reason = %reason, "貼り付けの権限がない");
+                self.show_overlay_error(reason);
+            }
+        }
         if self.settings.listening_enabled && !self.connection_needs_attention() {
             self.enable_listening();
         } else {
@@ -1133,6 +1147,55 @@ impl Controller {
         }
         self.clear_overlay_facts();
         self.refresh_overlay();
+    }
+
+    /// 同梱サーバーを立てる。必要なら認識モデルを自動ダウンロードし、進捗を
+    /// オーバーレイへ出す。**起動時に一度だけ呼ぶ。** 認識エンジンの変更は
+    /// 再起動後に反映されるので、切り替え後もこの経路を通る。
+    fn bootstrap_bundled_server(&mut self) {
+        let Ok(endpoint) = self.provider.endpoint_hint(&self.settings.core) else {
+            return;
+        };
+        let engine = self.settings.asr_engine.clone();
+        // 進捗表示は set_overlay を通さず直接 UI へ送る（ダウンロード中は
+        // &mut self を握れないため）。表示は完了後に本来の状態へ戻す。
+        let to_ui = self.to_ui.clone();
+        let mut last_percent: Option<u8> = None;
+        let result = bundled_server::start_if_needed(&endpoint.url, &engine, &mut |status| {
+            if status.total == 0 {
+                return;
+            }
+            let percent = ((status.downloaded.min(status.total) * 100) / status.total) as u8;
+            if last_percent == Some(percent) {
+                return;
+            }
+            last_percent = Some(percent);
+            let to_mib = |bytes: u64| (bytes as f64) / (1024.0 * 1024.0);
+            let message = format!(
+                "認識モデルを準備しています… {percent}%（{:.0} / {:.0} MB）",
+                to_mib(status.downloaded),
+                to_mib(status.total)
+            );
+            let _ = to_ui.try_send(UiUpdate::Overlay(OverlayView::Shown {
+                kind: OverlayKind::Preparing,
+                committed: message,
+                partial: String::new(),
+                error: String::new(),
+            }));
+        });
+        match result {
+            Ok(Some(model_dir)) => {
+                tracing::info!(model_dir = %model_dir.display(), "同梱の ASR サーバーを起動した");
+            }
+            Ok(None) => {}
+            // 起動できなくても続ける。設定画面でエンジンや接続先を直せるようにする。
+            Err(failure) => {
+                tracing::warn!(message = %failure, "同梱の ASR サーバーを起動できない");
+                self.bundled_server_failure = Some(failure.into_readiness_message());
+            }
+        }
+        // 進捗表示で書き換えた分を、コントローラ本来の表示へ戻す。
+        self.render_overlay();
     }
 
     fn update_settings(&mut self, settings: Settings) {
