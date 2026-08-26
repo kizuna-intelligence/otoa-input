@@ -32,7 +32,10 @@ case "$(uname -m)" in
     *) echo "対応していない CPU: $(uname -m)" >&2; exit 1 ;;
 esac
 
-NAME="otoa-input-$VERSION-$OS-$ARCH"
+# **名前にバージョンを入れない。** 入れると毎回リンクが変わり、
+# releases/latest/download/<名前> で「いつでも最新」を指せなくなる。
+# どの版かは中の はじめに.txt と --version で分かる。
+NAME="otoa-input-$OS-$ARCH"
 STAGE="$OUT/$NAME"
 
 echo "==> ビルド ($OS/$ARCH)"

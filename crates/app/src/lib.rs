@@ -145,6 +145,7 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
                       音声・接続なしで設定画面を表示する。
                       general/mic/asr/advanced/account/about
   -h, --help          この使い方を表示する
+  -V, --version       版を表示する
 
 設定はトレイアイコンの「設定」から変更する。設定ファイルの場所は
 Linux なら ~/.config/otoa-input-oss/settings.json。
@@ -233,6 +234,15 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         .any(|argument| argument == "--help" || argument == "-h")
     {
         print!("{USAGE}");
+        return Ok(());
+    }
+    // 配布物の名前に版を入れていないので、**手元のものがどれかはここで見る。**
+    // `--help` と同じく、多重起動の判定より先に置く。
+    if arguments
+        .iter()
+        .any(|argument| argument == "--version" || argument == "-V")
+    {
+        println!("otoa-input {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
