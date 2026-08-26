@@ -2,8 +2,8 @@ use crate::settings::Settings;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use otoa_input_core::Account;
 use otoa_input_core::{
-    ConnectionProvider, GateEvent, PasteShortcutSetting, PreRoll, Readiness, Session, SessionInput,
-    SessionState, SpeechGate, Transcript,
+    ConnectionProvider, EnrollOutcome, EnrollReason, GateEvent, PasteShortcutSetting, PreRoll,
+    Readiness, Session, SessionInput, SessionState, SpeechGate, Transcript,
 };
 use otoa_input_platform::{AudioCapture, AudioFrame, PasteMethod, PasteShortcut, TextOutput};
 use otoa_input_protocol::{
@@ -24,8 +24,19 @@ const TEXT_UI_MIN_INTERVAL: Duration = Duration::from_millis(30);
 const AUDIO_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(1);
 const DUPLICATE_COMMIT_WINDOW: Duration = Duration::from_secs(5);
 const OVERLAY_ERROR_DURATION: Duration = Duration::from_secs(8);
+const OVERLAY_NOTICE_DURATION: Duration = Duration::from_secs(3);
+/// 通常応答の実機中央値は 2.58 秒。通常時に待機表示を出さない余裕として 4.0 秒にする。
+const SERVER_RESPONSE_WAITING_OVERLAY_DELAY: Duration = Duration::from_secs(4);
+/// コールドスタートは実測 16〜64 秒。早期に起動待ちを伝えるため、10.0 秒で切り替える。
+const SERVER_RESPONSE_STARTING_OVERLAY_DELAY: Duration = Duration::from_secs(10);
 const FAILED_RETRY_INITIAL: Duration = Duration::from_secs(5);
 const FAILED_RETRY_MAX: Duration = Duration::from_secs(30);
+/// enrollment のリモート失敗は、100 ms tick ごとに再試行せず最低 5 秒待つ。
+const ENROLL_RETRY_INITIAL: Duration = Duration::from_secs(5);
+const ENROLL_RETRY_MAX: Duration = Duration::from_secs(60);
+/// Modal の scaledown_window と揃える。これ以上 ASR の成功応答が無ければ、
+/// 次の発話の前に enrollment を送り、認識器が起きるまで待つ。
+const WARMUP_IDLE_THRESHOLD: Duration = Duration::from_secs(60);
 #[allow(dead_code)]
 const CONNECTING_TIMEOUT: Duration = Duration::from_secs(10);
 #[allow(dead_code)]
@@ -62,6 +73,8 @@ pub enum OverlayView {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OverlayKind {
+    /// 認識器を起こし、参照音声を登録している。発話は受け付けない。
+    WarmingUp,
     Connecting,
     /// マイクが今の発話を拾っている。
     Recognizing,
@@ -69,7 +82,13 @@ pub enum OverlayKind {
     /// この状態を持たないと、認識待ちの間だけオーバーレイが消えて、
     /// 何も起きていないように見える。
     Finalizing,
+    /// 端末の VAD が無音を検知したあと、サーバーの確定応答を待っている。
+    WaitingForResponse,
+    /// その応答待ちが長く、サーバーの起動を待っている。
+    StartingServer,
     Committed,
+    /// セッションを継続したまま短時間だけ表示する通知。
+    Notice,
     Error,
     LoginNeeded,
 }
@@ -117,6 +136,177 @@ pub enum VadControl {
     Shutdown,
 }
 
+/// VAD が今の発話を拾っているか。表示を導出するためだけの状態で、
+/// 実際の VAD 制御は [`SpeechGate`] が引き続き所有する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateState {
+    Idle,
+    Speaking,
+}
+
+/// 端末の VAD が無音を検知してから、サーバーの確定応答を待っている発話。
+///
+/// 第1段では既存挙動を保つため常に高々一件だけを入れる。第3段で
+/// `SpeechStarted` ごとの世代と複数待機へ切り替える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Wait {
+    epoch: u64,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+enum NoticeKind {
+    Asr,
+}
+
+#[derive(Debug, Clone)]
+struct Notice {
+    kind: NoticeKind,
+    message: String,
+    until: Instant,
+}
+
+#[derive(Debug, Clone)]
+enum UserError {
+    Temporary { message: String, until: Instant },
+    Persistent { kind: OverlayKind, message: String },
+}
+
+/// オーバーレイを導出するための事実。
+///
+/// `overlay` 自体は描画済みの前回値だけを保持する。何を表示するかは必ず
+/// この値から [`view`] で求める。
+#[derive(Debug, Clone)]
+struct Facts {
+    session: SessionState,
+    gate: GateState,
+    warmup: Option<Instant>,
+    /// 第1段では旧来どおり一件だけ。第3段で FIFO として有効化する。
+    pending: VecDeque<Wait>,
+    commit: Option<(String, Instant)>,
+    notice: Option<Notice>,
+    error: Option<UserError>,
+    /// 途中結果は gate が Idle になった後にも届くため、gate と独立に持つ。
+    partial: Option<String>,
+    /// client endpoint の finalize を送ってから確定応答を受けるまで。
+    finalizing: bool,
+}
+
+/// `Facts` だけからオーバーレイを導出する。副作用を持たない。
+///
+fn view(facts: &Facts, now: Instant) -> OverlayView {
+    match facts.error.as_ref() {
+        Some(UserError::Temporary { message, until }) if now < *until => {
+            return OverlayView::Shown {
+                kind: OverlayKind::Error,
+                committed: String::new(),
+                partial: String::new(),
+                error: message.clone(),
+            };
+        }
+        Some(UserError::Persistent { kind, message }) => {
+            return OverlayView::Shown {
+                kind: *kind,
+                committed: String::new(),
+                partial: String::new(),
+                error: message.clone(),
+            };
+        }
+        Some(UserError::Temporary { .. }) | None => {}
+    }
+
+    if let Some(notice) = facts.notice.as_ref().filter(|notice| now < notice.until) {
+        let _ = &notice.kind;
+        return OverlayView::Shown {
+            kind: OverlayKind::Notice,
+            committed: String::new(),
+            partial: String::new(),
+            error: notice.message.clone(),
+        };
+    }
+
+    if let Some((committed, _until)) = facts.commit.as_ref().filter(|(_, until)| now < *until) {
+        return OverlayView::Shown {
+            kind: OverlayKind::Committed,
+            committed: committed.clone(),
+            partial: String::new(),
+            error: String::new(),
+        };
+    }
+
+    if facts.warmup.is_some() {
+        return blank_overlay(OverlayKind::WarmingUp);
+    }
+
+    if let Some(wait) = facts.pending.front() {
+        let elapsed = now.saturating_duration_since(wait.started_at);
+        if elapsed >= SERVER_RESPONSE_STARTING_OVERLAY_DELAY {
+            return blank_overlay(OverlayKind::StartingServer);
+        }
+        if elapsed >= SERVER_RESPONSE_WAITING_OVERLAY_DELAY {
+            return blank_overlay(OverlayKind::WaitingForResponse);
+        }
+    }
+
+    if let Some(partial) = facts.partial.as_ref().filter(|partial| !partial.is_empty()) {
+        return OverlayView::Shown {
+            kind: OverlayKind::Recognizing,
+            committed: String::new(),
+            partial: partial.clone(),
+            error: String::new(),
+        };
+    }
+
+    if facts.finalizing {
+        return blank_overlay(OverlayKind::Finalizing);
+    }
+
+    if facts.gate == GateState::Speaking {
+        return blank_overlay(OverlayKind::Recognizing);
+    }
+
+    OverlayView::Hidden
+}
+
+fn blank_overlay(kind: OverlayKind) -> OverlayView {
+    OverlayView::Shown {
+        kind,
+        committed: String::new(),
+        partial: String::new(),
+        error: String::new(),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WarmupReason {
+    Startup,
+    Idle,
+}
+
+impl WarmupReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Idle => "idle",
+        }
+    }
+}
+
+#[cfg(test)]
+struct WarmupResult {
+    reason: WarmupReason,
+    started_at: Instant,
+    result: anyhow::Result<()>,
+}
+
+/// worker から返す、型付き enrollment 結果。`WarmupResult` は既存 unit test の
+/// 局所的な失敗注入用として残し、実行経路は必ずこちらを使う。
+struct EnrollmentWarmupResult {
+    reason: WarmupReason,
+    started_at: Instant,
+    outcome: EnrollOutcome,
+}
+
 pub enum ControllerCommand {
     StartStop,
     StartLogin,
@@ -144,12 +334,46 @@ pub struct Controller {
     pub(crate) transcript: Transcript,
     pub(crate) settings: Settings,
     pub(crate) pending_audio: Vec<Vec<u8>>,
+    /// 接続待ちの上限で捨てた音声フレーム数。無音のまま失われないようログにも出す。
+    pending_audio_dropped_frames: u64,
     pub(crate) to_asr: Option<Sender<AsrCommand>>,
     pub(crate) to_ui: Sender<UiUpdate>,
     pub(crate) text_out: TextOutput,
+    facts: Facts,
+    /// `SpeechStarted` ごとの通し番号。応答順を待機 FIFO と対応付けるために記録する。
+    epoch: u64,
+    /// 前回描画した値。表示理由は保持せず、Facts から導出した結果の重複送信を抑える。
     overlay: OverlayView,
+    /// 第1・第2段のテストが直接観測している期限。製品の表示状態には使わない。
+    #[cfg(test)]
     overlay_error_until: Option<Instant>,
+    #[cfg(test)]
+    overlay_notice_until: Option<Instant>,
     splash_started_at: Option<Instant>,
+    /// enrollment worker が走っているか。
+    warmup_in_progress: bool,
+    warmup_result_rx: Option<Receiver<(u64, EnrollmentWarmupResult)>>,
+    warmup_thread: Option<thread::JoinHandle<()>>,
+    warmup_started_at: Option<Instant>,
+    warmup_reason: Option<WarmupReason>,
+    /// cancel 後に遅れて届いた worker 結果を捨てる世代。
+    warmup_epoch: u64,
+    /// `RetryableRemote` の次回試行時刻と指数バックオフ。
+    warmup_retry_at: Option<Instant>,
+    warmup_retry_delay: Duration,
+    /// 最後に成功した ASR サービス応答。初回は warmup の成功を基準にする。
+    last_successful_asr_response_at: Option<Instant>,
+    /// warmup 中に始まった発話。成功時は「まだ話さないでください」の案内どおり
+    /// 捨てるが、RetryableRemote では下のバッファから接続を続行する。
+    discarding_warmup_speech: bool,
+    /// warmup が発話開始と競合した場合の音声。リモート enrollment 失敗だけは
+    /// 発話を捨てずに、この音声を接続確立後へ渡す。
+    warmup_speech_audio: Vec<Vec<i16>>,
+    /// `discarding_warmup_speech` 中に VAD が終話を検知したか。
+    warmup_speech_ended: bool,
+    /// RetryableRemote 後に遅延開始した ASR が Connected になったら、保存済みの
+    /// 端末側で終話を確定する(endpoint_mode=client のときだけ)。
+    finish_after_deferred_warmup_connect: bool,
     gate: SpeechGate,
     preroll: PreRoll,
     /// ASR セッションを開始した時刻。
@@ -169,8 +393,32 @@ pub struct Controller {
     /// endpoint_mode=client のとき、finalize を送ってから次の発話開始までの抑止。
     /// これが無いと SpeechEnded のたびに finalize を送り、同じ貼り付けを繰り返す。
     client_finalize_sent: bool,
+    /// endpoint_mode=server のとき、`<end>` を受けてから次の発話開始までの抑止。
+    /// 第1・第2段のテストが直接観測している単一待機。製品コードは `Facts.pending`
+    /// の FIFO だけを使う。
+    #[cfg(test)]
+    server_response_wait_started_at: Option<Instant>,
+    #[cfg(test)]
+    server_response_wait_overlay_visible: bool,
+    /// サーバーが `<end>` を返し、かつ端末側でも発話中でない間は、無音を
+    /// 同じストリームへ送り続けない。次の発話に備えてプリロールだけ保つ。
+    server_audio_paused: bool,
     /// `finalize` を送ってから結果が返るまで。オーバーレイの「文字にしています」表示に使う。
     finalize_pending: bool,
+    /// 最後に「確実に声だった」フレームの時刻(確率 >= 0.9)。
+    ///
+    /// 利用者が体感する遅延の起点はここである。`vad edge`(閾値 0.5 を割った瞬間)
+    /// ではない。閾値を割るのは声が消えかけてからで、体感より後になる。
+    /// 2026-08-25、この起点で測らなかったために報告値(2.0 秒)と体感(4 秒)が
+    /// 食い違い続けた。
+    last_confident_speech_at: Option<Instant>,
+    /// `FinalText` と直後の `<end>` / `<fin>` は同じ応答フレームから分解された
+    /// イベントである。前者で FIFO を進めた後、後者が次の待機を二重に pop しない
+    /// ようにする。
+    pending_completed_by_final_text: bool,
+    /// `<end>` の直後に届く通知は同じ応答に属する。次の待機を消さないための一回限り
+    /// の抑止で、次の通常応答が始まれば解除する。
+    pending_completed_by_endpoint: bool,
     /// Failed に入った時刻。自動復帰対象でない失敗では使わない。
     failed_at: Option<Instant>,
     /// Failed からの自動復帰を許可するか。
@@ -187,6 +435,7 @@ pub struct Controller {
     vad_level_peak: i16,
     vad_level_samples: u64,
     vad_prob_max: f32,
+    vad_frame_voiced: bool,
     level_peak: i16,
     level_clip_window: VecDeque<LevelWindow>,
     last_vad_log_at: Instant,
@@ -197,6 +446,7 @@ pub struct Controller {
     asr_events: Option<Receiver<AsrEvent>>,
     asr_thread: Option<thread::JoinHandle<()>>,
     pending_commit: String,
+    #[cfg(test)]
     committed_hold_until: Option<Instant>,
     last_commit: Option<(String, Instant)>,
     last_text_ui: Option<Instant>,
@@ -224,6 +474,7 @@ impl Controller {
     ) -> anyhow::Result<Self> {
         let gate = gate_from_settings(&settings);
         let preroll = PreRoll::new(milliseconds_to_samples(settings.preroll_ms));
+        let splash_started_at = Instant::now();
         let mut text_out = TextOutput::new()?;
         configure_text_output(&mut text_out, &settings);
         Ok(Self {
@@ -231,12 +482,42 @@ impl Controller {
             transcript: Transcript::new(),
             settings,
             pending_audio: Vec::new(),
+            pending_audio_dropped_frames: 0,
             to_asr: None,
             to_ui,
             text_out,
+            facts: Facts {
+                session: SessionState::Disabled,
+                gate: GateState::Idle,
+                warmup: None,
+                pending: VecDeque::new(),
+                commit: None,
+                notice: None,
+                error: None,
+                partial: None,
+                finalizing: false,
+            },
+            epoch: 0,
+            // 起動直後はロゴを見せる。main の既定に合わせる。
             overlay: OverlayView::Splash,
+            #[cfg(test)]
             overlay_error_until: None,
-            splash_started_at: Some(Instant::now()),
+            #[cfg(test)]
+            overlay_notice_until: None,
+            splash_started_at: Some(splash_started_at),
+            warmup_in_progress: false,
+            warmup_result_rx: None,
+            warmup_thread: None,
+            warmup_started_at: None,
+            warmup_reason: None,
+            warmup_epoch: 0,
+            warmup_retry_at: None,
+            warmup_retry_delay: ENROLL_RETRY_INITIAL,
+            last_successful_asr_response_at: None,
+            discarding_warmup_speech: false,
+            warmup_speech_audio: Vec::new(),
+            warmup_speech_ended: false,
+            finish_after_deferred_warmup_connect: false,
             gate,
             preroll,
             session_started_at: None,
@@ -246,7 +527,15 @@ impl Controller {
             sent_audio_ms: 0,
             asr_closing: false,
             client_finalize_sent: false,
+            #[cfg(test)]
+            server_response_wait_started_at: None,
+            #[cfg(test)]
+            server_response_wait_overlay_visible: false,
+            server_audio_paused: false,
             finalize_pending: false,
+            last_confident_speech_at: None,
+            pending_completed_by_final_text: false,
+            pending_completed_by_endpoint: false,
             failed_at: None,
             failed_recovery_enabled: false,
             failed_retry_delay: FAILED_RETRY_INITIAL,
@@ -259,6 +548,7 @@ impl Controller {
             vad_level_peak: 0,
             vad_level_samples: 0,
             vad_prob_max: 0.0,
+            vad_frame_voiced: false,
             level_peak: 0,
             level_clip_window: VecDeque::new(),
             last_vad_log_at: Instant::now(),
@@ -269,6 +559,7 @@ impl Controller {
             asr_events: None,
             asr_thread: None,
             pending_commit: String::new(),
+            #[cfg(test)]
             committed_hold_until: None,
             last_commit: None,
             last_text_ui: None,
@@ -288,7 +579,7 @@ impl Controller {
         self.send_account_update();
         self.send_login_state();
         self.send_route_update();
-        self.send_ui(UiUpdate::Overlay(self.overlay.clone()));
+        self.render_overlay();
         if self.settings.listening_enabled && !self.connection_needs_attention() {
             self.enable_listening();
         } else {
@@ -298,6 +589,7 @@ impl Controller {
         let ticker = crossbeam_channel::tick(CONTROLLER_TICK);
         let mut shutting_down = false;
         while !shutting_down {
+            self.drain_warmup_events();
             self.drain_vad_events();
             self.drain_asr_events();
             self.drain_login_events();
@@ -395,11 +687,12 @@ impl Controller {
             Ok(()) => {
                 self.send_account_update();
                 self.send_login_state();
-                self.hide_overlay();
+                self.clear_overlay_facts();
                 if self.settings.listening_enabled && self.session.state() == SessionState::Disabled
                 {
                     self.enable_listening();
                 }
+                self.refresh_overlay();
             }
             Err(error) if error.to_string().contains("timed out") => {
                 self.send_account_update();
@@ -423,6 +716,294 @@ impl Controller {
             cancelled.store(true, std::sync::atomic::Ordering::Release);
         }
         self.finish_login_worker();
+    }
+
+    /// enrollment worker を開始する。実際に呼ぶ経路は `Listening` 中の idle
+    /// scheduler と SpeechStarted の補助経路だけで、Disabled 中には走らない。
+    fn start_warmup(&mut self, reason: WarmupReason) -> bool {
+        if self.warmup_in_progress {
+            return true;
+        }
+        if !self.provider.enrollment_is_eligible(&self.settings.core)
+            || self
+                .warmup_retry_at
+                .is_some_and(|retry_at| Instant::now() < retry_at)
+            || matches!(self.facts.error, Some(UserError::Persistent { .. }))
+        {
+            return false;
+        }
+
+        let started_at = Instant::now();
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let provider = Arc::clone(&self.provider);
+        let settings = self.settings.core.clone();
+        self.warmup_epoch = self.warmup_epoch.wrapping_add(1);
+        let worker_epoch = self.warmup_epoch;
+
+        self.warmup_in_progress = true;
+        self.warmup_started_at = Some(started_at);
+        self.warmup_reason = Some(reason);
+        self.facts.warmup = Some(started_at);
+        self.splash_started_at = None;
+        self.refresh_overlay();
+        tracing::info!(
+            target: "otoa_input",
+            epoch = worker_epoch,
+            reason = reason.as_str(),
+            "warmup: started"
+        );
+
+        let worker = thread::Builder::new()
+            .name("otoa-warmup".to_string())
+            .spawn(move || {
+                let outcome = provider.ensure_enrolled(&settings, EnrollReason::Warmup);
+                let _ = result_tx.send((
+                    worker_epoch,
+                    EnrollmentWarmupResult {
+                        reason,
+                        started_at,
+                        outcome,
+                    },
+                ));
+            });
+
+        match worker {
+            Ok(worker) => {
+                self.warmup_result_rx = Some(result_rx);
+                self.warmup_thread = Some(worker);
+            }
+            Err(error) => {
+                self.finish_warmup_worker();
+                self.finish_enrollment_warmup(
+                    worker_epoch,
+                    EnrollmentWarmupResult {
+                        reason,
+                        started_at,
+                        outcome: EnrollOutcome::RetryableRemote(format!(
+                            "起動処理を開始できませんでした: {error}"
+                        )),
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    fn drain_warmup_events(&mut self) {
+        let result = match self.warmup_result_rx.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(TryRecvError::Empty)) => None,
+            Some(Err(TryRecvError::Disconnected)) => Some((
+                self.warmup_epoch,
+                EnrollmentWarmupResult {
+                    reason: self.warmup_reason.unwrap_or(WarmupReason::Startup),
+                    started_at: self.warmup_started_at.unwrap_or_else(Instant::now),
+                    outcome: EnrollOutcome::RetryableRemote(
+                        "起動処理が予期せず終了しました".to_string(),
+                    ),
+                },
+            )),
+            None => None,
+        };
+        let Some((worker_epoch, result)) = result else {
+            return;
+        };
+        self.finish_warmup_worker();
+        self.finish_enrollment_warmup(worker_epoch, result);
+    }
+
+    fn finish_warmup_worker(&mut self) {
+        self.warmup_result_rx = None;
+        self.warmup_started_at = None;
+        self.warmup_reason = None;
+        if let Some(worker) = self.warmup_thread.take() {
+            let _ = worker.join();
+        }
+    }
+
+    fn cancel_warmup(&mut self) {
+        // reqwest の blocking request は途中で安全に取り消せない。終了を待つと
+        // 最大 timeout までアプリを閉じられなくなるため、JoinHandle を外して
+        // プロセス終了に任せる。世代を進め、遅れて届く結果も無視する。
+        self.warmup_epoch = self.warmup_epoch.wrapping_add(1);
+        self.warmup_in_progress = false;
+        self.warmup_result_rx = None;
+        self.warmup_started_at = None;
+        self.warmup_reason = None;
+        self.facts.warmup = None;
+        self.clear_deferred_warmup_speech();
+        self.warmup_thread.take();
+    }
+
+    fn finish_enrollment_warmup(&mut self, worker_epoch: u64, result: EnrollmentWarmupResult) {
+        if worker_epoch != self.warmup_epoch || !self.warmup_in_progress {
+            tracing::debug!(
+                target: "otoa_input",
+                worker_epoch,
+                current_epoch = self.warmup_epoch,
+                "discarded stale warmup result"
+            );
+            return;
+        }
+
+        let was_warming = self.is_warming_overlay();
+        self.warmup_in_progress = false;
+        self.facts.warmup = None;
+        let elapsed_ms = result.started_at.elapsed().as_millis() as u64;
+        match result.outcome {
+            EnrollOutcome::Ready => {
+                self.last_successful_asr_response_at = Some(Instant::now());
+                self.warmup_retry_at = None;
+                self.warmup_retry_delay = ENROLL_RETRY_INITIAL;
+                tracing::info!(
+                    target: "otoa_input",
+                    reason = result.reason.as_str(),
+                    elapsed_ms,
+                    "warmup: done"
+                );
+                self.clear_deferred_warmup_speech();
+                if was_warming {
+                    self.refresh_overlay();
+                }
+            }
+            EnrollOutcome::RetryableRemote(message) => {
+                let retry_delay = self.warmup_retry_delay;
+                self.warmup_retry_at = Some(Instant::now() + retry_delay);
+                self.warmup_retry_delay = next_enroll_retry_delay(retry_delay);
+                tracing::warn!(
+                    target: "otoa_input",
+                    reason = result.reason.as_str(),
+                    elapsed_ms,
+                    retry_after_secs = retry_delay.as_secs(),
+                    error = %message,
+                    "warmup: retryable remote failure"
+                );
+                if self.discarding_warmup_speech {
+                    // gateway は保存済み参照音声から回復できる。通信失敗で既に
+                    // 始まった発話まで捨てず、保存した音声で接続を続ける。
+                    self.resume_deferred_warmup_speech();
+                } else if was_warming {
+                    self.refresh_overlay();
+                }
+            }
+            EnrollOutcome::NeedsUserAction(message) => {
+                tracing::warn!(
+                    target: "otoa_input",
+                    reason = result.reason.as_str(),
+                    elapsed_ms,
+                    error = %message,
+                    "warmup: user action required"
+                );
+                self.warmup_retry_at = None;
+                self.clear_deferred_warmup_speech();
+                self.fail_runtime_user_action(message);
+            }
+        }
+    }
+
+    /// 既存 unit test の局所的な `anyhow::Result` 注入用。実行中の worker は必ず
+    /// `EnrollmentWarmupResult` を通るため、RetryableRemote の扱いには使わない。
+    #[cfg(test)]
+    fn finish_warmup(&mut self, result: WarmupResult) {
+        let was_warming = self.is_warming_overlay();
+        self.warmup_in_progress = false;
+        self.facts.warmup = None;
+        let elapsed_ms = result.started_at.elapsed().as_millis() as u64;
+        match result.result {
+            Ok(()) => {
+                self.last_successful_asr_response_at = Some(Instant::now());
+                tracing::info!(
+                    target: "otoa_input",
+                    reason = result.reason.as_str(),
+                    elapsed_ms,
+                    "warmup: done"
+                );
+                if was_warming {
+                    self.refresh_overlay();
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "otoa_input",
+                    reason = result.reason.as_str(),
+                    elapsed_ms,
+                    error = %error,
+                    "warmup: failed"
+                );
+                let message = error.to_string();
+                if is_user_action_failure_message(&message) {
+                    self.fail_runtime_user_action(message);
+                } else if was_warming {
+                    self.show_overlay_error(
+                        "音声認識サービスを起動できませんでした。ネットワークを確認してから、もう一度話してください。"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn clear_deferred_warmup_speech(&mut self) {
+        self.discarding_warmup_speech = false;
+        self.warmup_speech_audio.clear();
+        self.warmup_speech_ended = false;
+        self.finish_after_deferred_warmup_connect = false;
+    }
+
+    fn resume_deferred_warmup_speech(&mut self) {
+        let speech_audio = std::mem::take(&mut self.warmup_speech_audio);
+        let speech_ended = std::mem::replace(&mut self.warmup_speech_ended, false);
+        self.discarding_warmup_speech = false;
+
+        if self.session.state() != SessionState::Listening
+            || !self.session.apply(SessionInput::SpeechStarted)
+        {
+            return;
+        }
+        self.finish_after_deferred_warmup_connect = speech_ended;
+        if let Err(error) = self.start_asr_after_speech_started(Vec::new(), speech_audio) {
+            if self.session.state() != SessionState::Disabled {
+                let message = error.to_string();
+                if is_user_action_failure_message(&message) {
+                    self.fail_runtime_user_action(message);
+                } else {
+                    self.fail_runtime(message);
+                }
+            }
+        }
+    }
+
+    fn warmup_is_due(&self) -> bool {
+        self.provider.enrollment_is_eligible(&self.settings.core)
+            && !matches!(self.facts.error, Some(UserError::Persistent { .. }))
+            && self
+                .warmup_retry_at
+                .is_none_or(|retry_at| Instant::now() >= retry_at)
+            && self
+                .last_successful_asr_response_at
+                .is_none_or(|last_response| last_response.elapsed() >= WARMUP_IDLE_THRESHOLD)
+    }
+
+    /// 無操作中に認識器を起こす。最初の SpeechStarted まで待つと、その発話を
+    /// warmup 中として捨てることになるため、Listening 中に先回りする。
+    fn start_idle_warmup_if_due(&mut self) {
+        if self.session.state() == SessionState::Listening
+            && !self.gate.is_speaking()
+            && self.warmup_is_due()
+        {
+            let _ = self.start_warmup(WarmupReason::Idle);
+        }
+    }
+
+    fn is_warming_overlay(&self) -> bool {
+        self.facts.warmup.is_some()
+            || matches!(
+                self.overlay,
+                OverlayView::Shown {
+                    kind: OverlayKind::WarmingUp,
+                    ..
+                }
+            )
     }
 
     fn send_login_failure(&mut self, reason: String) {
@@ -472,13 +1053,8 @@ impl Controller {
             let _ = self.session.apply(SessionInput::Disable);
         }
         self.send_ui(UiUpdate::State(SessionState::Disabled));
-        self.overlay_error_until = None;
-        self.set_overlay(OverlayView::Shown {
-            kind,
-            committed: String::new(),
-            partial: String::new(),
-            error: message,
-        });
+        self.facts.error = Some(UserError::Persistent { kind, message });
+        self.refresh_overlay();
         self.send_login_state();
     }
 
@@ -513,15 +1089,21 @@ impl Controller {
             return;
         }
         self.send_ui(UiUpdate::State(SessionState::Listening));
+        // Disabled の間は warmup を開始しない。Listening へ遷移してからだけ、
+        // 初回 / idle 後の enrollment を先回りで試す。
+        self.start_idle_warmup_if_due();
     }
 
     fn disable_listening(&mut self) {
-        self.hide_overlay();
+        // blocking enrollment は止められない場合がある。receiver を外し epoch を
+        // 進めることで、Disabled になった後の結果を必ず捨てる。
+        self.cancel_warmup();
         self.suspend_vad();
         self.audio_capture.take();
         self.gate.reset();
         self.preroll.clear();
         self.level_clip_window.clear();
+        self.clear_pending_waits("listening disabled");
 
         match self.session.state() {
             SessionState::Listening => {
@@ -529,7 +1111,7 @@ impl Controller {
                     self.send_ui(UiUpdate::State(SessionState::Disabled));
                 }
             }
-            SessionState::Connecting | SessionState::Streaming | SessionState::Holding => {
+            SessionState::Connecting | SessionState::Streaming => {
                 if self.session.apply(SessionInput::Disable) {
                     self.closing_started_at = Some(Instant::now());
                     self.send_ui(UiUpdate::State(SessionState::Closing));
@@ -549,6 +1131,8 @@ impl Controller {
             }
             SessionState::Disabled => {}
         }
+        self.clear_overlay_facts();
+        self.refresh_overlay();
     }
 
     fn update_settings(&mut self, settings: Settings) {
@@ -603,6 +1187,40 @@ impl Controller {
             return;
         }
 
+        const CONFIDENT_SPEECH_PROB: f32 = 0.9;
+        if frame
+            .probs
+            .iter()
+            .copied()
+            .any(|prob| prob >= CONFIDENT_SPEECH_PROB)
+        {
+            self.last_confident_speech_at = Some(Instant::now());
+        }
+
+        let threshold = self.settings.vad_threshold;
+        for (index, prob) in frame.probs.iter().copied().enumerate() {
+            let voiced = prob >= threshold;
+            if voiced == self.vad_frame_voiced {
+                continue;
+            }
+            if voiced {
+                tracing::debug!(
+                    target: "otoa_input",
+                    index,
+                    prob,
+                    "vad edge: silent -> voiced"
+                );
+            } else {
+                tracing::debug!(
+                    target: "otoa_input",
+                    index,
+                    prob,
+                    "vad edge: voiced -> silent"
+                );
+            }
+            self.vad_frame_voiced = voiced;
+        }
+
         let events = frame
             .probs
             .into_iter()
@@ -617,31 +1235,47 @@ impl Controller {
     fn handle_gate_event(&mut self, event: GateEvent) {
         match event {
             GateEvent::SpeechStarted => {
+                tracing::debug!(target: "otoa_input", "gate: speech started");
+                self.epoch = self.epoch.wrapping_add(1);
+                self.facts.gate = GateState::Speaking;
                 self.client_finalize_sent = false;
+                // 利用者が次を喋り始めていても、届いていない応答は前の発話の
+                // ものでありうる。サーバーが実際に答えるか、セッションが終わる
+                // まで、その待ちを消さない。
+                self.log_server_response_wait_kept("next speech started");
                 self.clear_commit_hold();
+                self.clear_overlay_notice();
+                if self.warmup_in_progress {
+                    // idle warmup と同時に話し始めた場合は結果を待つ。ただし
+                    // RetryableRemote ならこの音声で接続を続けるため、入力は保持する。
+                    self.discarding_warmup_speech = true;
+                    self.warmup_speech_audio.clear();
+                    self.warmup_speech_ended = false;
+                    self.preroll.clear();
+                    tracing::debug!(target: "otoa_input", "speech deferred while warmup is running");
+                    return;
+                }
+                if self.session.state() == SessionState::Listening && self.warmup_is_due() {
+                    self.discarding_warmup_speech = true;
+                    self.warmup_speech_audio.clear();
+                    self.warmup_speech_ended = false;
+                    self.preroll.clear();
+                    if self.start_warmup(WarmupReason::Idle) {
+                        return;
+                    }
+                    self.clear_deferred_warmup_speech();
+                }
                 match self.session.state() {
                     SessionState::Listening => {
+                        if !self.ensure_enrolled_before_connection() {
+                            return;
+                        }
                         if !self.session.apply(SessionInput::SpeechStarted) {
                             return;
                         }
-                        let now = Instant::now();
-                        self.session_started_at = Some(now);
-                        self.connecting_started_at = Some(now);
-                        self.closing_started_at = None;
-                        self.last_speech_endpoint_at = Some(now);
-                        self.sent_audio_ms = 0;
-                        self.last_audio_log_at = Some(now);
-                        self.log_session_event("SpeechStarted");
                         let preroll = self.preroll.take();
-                        // 先頭欠けの切り分け用。検知が遅れた分をプリロールが
-                        // 覆えているかは、この値と preroll_ms の設定で分かる。
-                        tracing::debug!(
-                            target: "otoa_input",
-                            preroll_ms = (preroll.len() * 1000) / VAD_SAMPLE_RATE as usize,
-                            capacity_ms = self.settings.preroll_ms,
-                            "session preroll"
-                        );
-                        if let Err(error) = self.start_asr(preroll) {
+                        if let Err(error) = self.start_asr_after_speech_started(preroll, Vec::new())
+                        {
                             if self.session.state() != SessionState::Disabled {
                                 let message = error.to_string();
                                 if is_user_action_failure_message(&message) {
@@ -652,37 +1286,178 @@ impl Controller {
                             }
                         }
                     }
-                    SessionState::Streaming => self.refresh_overlay(),
+                    SessionState::Streaming => {
+                        // 同じ WebSocket を次の発話にも使うので、前回の `<end>`
+                        // を基準に idle timeout させない。発話中の 15 秒切断も
+                        // ここで防ぐ。
+                        self.last_speech_endpoint_at = Some(Instant::now());
+                        if self.server_audio_paused {
+                            self.server_audio_paused = false;
+                            let preroll = self.preroll.take();
+                            if !preroll.is_empty() {
+                                tracing::debug!(
+                                    target: "otoa_input",
+                                    preroll_ms = (preroll.len() * 1000)
+                                        / VAD_SAMPLE_RATE as usize,
+                                    "resuming server ASR audio with preroll"
+                                );
+                                self.send_audio(&preroll);
+                            }
+                        }
+                        self.refresh_overlay()
+                    }
                     _ => {}
                 }
             }
             GateEvent::SpeechEnded => {
-                // endpoint_mode = "client" のときは、端末の VAD が終話を決める。
-                // 区切りの決定者はここ 1 か所。サーバー側にも持たせない。
-                if self.settings.endpoint_mode == "client"
-                    && self.session.state() == SessionState::Streaming
-                    && !self.client_finalize_sent
-                {
-                    self.client_finalize_sent = true;
-                    if self.send_finalize() {
-                        self.finalize_pending = true;
-                    }
+                tracing::debug!(
+                    target: "otoa_input",
+                    endpoint_mode = %self.settings.endpoint_mode,
+                    "gate: speech ended"
+                );
+                self.facts.gate = GateState::Idle;
+                if self.discarding_warmup_speech {
+                    // Enrollment がまだ走っている。Ready は従来どおり案内に従って
+                    // この発話を捨てるが、RetryableRemote なら worker 完了後に
+                    // 溜めてある音声を送り切る。
+                    self.warmup_speech_ended = true;
+                    tracing::debug!(target: "otoa_input", "speech ended while warmup is running");
+                    return;
                 }
-                self.refresh_overlay()
+                self.finish_current_speech()
             }
         }
     }
 
+    /// 接続前 enrollment の唯一の同期入口。リモート失敗は gateway 側の回復へ
+    /// 任せて接続を続け、端末でしか直せない不足だけを永続エラーにする。
+    fn ensure_enrolled_before_connection(&mut self) -> bool {
+        match self
+            .provider
+            .ensure_enrolled(&self.settings.core, EnrollReason::BeforeConnection)
+        {
+            EnrollOutcome::Ready => true,
+            EnrollOutcome::RetryableRemote(message) => {
+                tracing::warn!(
+                    target: "otoa_input",
+                    error = %message,
+                    "enrollment before connection failed remotely; continuing"
+                );
+                true
+            }
+            EnrollOutcome::NeedsUserAction(message) => {
+                self.fail_runtime_user_action(message);
+                false
+            }
+        }
+    }
+
+    /// `SessionInput::SpeechStarted` 後に ASR を開く共通処理。`deferred_audio` は
+    /// retryable warmup failure 中に保持した音声で、Connected 後に送信される。
+    fn start_asr_after_speech_started(
+        &mut self,
+        preroll: Vec<i16>,
+        deferred_audio: Vec<Vec<i16>>,
+    ) -> anyhow::Result<()> {
+        let now = Instant::now();
+        self.session_started_at = Some(now);
+        self.connecting_started_at = Some(now);
+        self.closing_started_at = None;
+        self.last_speech_endpoint_at = Some(now);
+        self.sent_audio_ms = 0;
+        self.last_audio_log_at = Some(now);
+        self.log_session_event("SpeechStarted");
+        tracing::debug!(
+            target: "otoa_input",
+            preroll_ms = (preroll.len() * 1000) / VAD_SAMPLE_RATE as usize,
+            capacity_ms = self.settings.preroll_ms,
+            deferred_frames = deferred_audio.len(),
+            "session preroll"
+        );
+        self.start_asr(preroll)?;
+        self.pending_audio.extend(
+            deferred_audio
+                .into_iter()
+                .map(|samples| samples_to_bytes(&samples)),
+        );
+        Ok(())
+    }
+
+    /// endpoint_mode = client では端末 VAD が終話を一度だけ
+    /// 決める。遅延 warmup 後に Connected になった場合にも同じ処理を使う。
+    fn finish_current_speech(&mut self) {
+        if self.settings.endpoint_mode == "client"
+            && self.session.state() == SessionState::Streaming
+            && !self.client_finalize_sent
+        {
+            self.client_finalize_sent = true;
+            tracing::debug!(target: "otoa_input", "sending finalize");
+            if self.send_finalize() {
+                self.finalize_pending = true;
+            } else {
+                tracing::debug!(
+                    target: "otoa_input",
+                    reason = "send failed",
+                    "finalize skipped"
+                );
+            }
+        } else if self.settings.endpoint_mode == "server"
+            && self.session.state() == SessionState::Streaming
+        {
+            // ここでサーバーへ何かを送ることはしない。**端末の VAD が決めて
+            // よいのは「話し始め」だけ**で、発話が終わったかどうかは ASR
+            // サーバーが判断する。端末が「終わった」と伝えると、その判断を
+            // 端末が肩代わりすることになる。
+            //
+            // ただし表示は端末の都合で先に動かしてよい。応答を待っている
+            // ことを利用者へ見せるのは、判断ではなく見せ方の話である。
+            self.start_server_response_wait();
+        } else if self.settings.endpoint_mode == "client" {
+            let reason = if self.session.state() != SessionState::Streaming {
+                "session is not streaming"
+            } else {
+                "finalize already sent"
+            };
+            tracing::debug!(target: "otoa_input", reason, "finalize skipped");
+        } else if self.settings.endpoint_mode != "server" {
+            tracing::debug!(
+                target: "otoa_input",
+                reason = "unsupported endpoint mode",
+                "speech end ignored"
+            );
+        }
+        self.refresh_overlay();
+    }
+
     fn handle_vad_samples(&mut self, samples: &[i16]) {
+        if self.discarding_warmup_speech {
+            // Ready の場合は後で捨てるが、RetryableRemote ではこのまま接続する。
+            // 最大 180 秒の enrollment timeout でも数 MB 程度で、音声を失うより
+            // 小さい。Disabled / cancel 時は即座に clear する。
+            self.warmup_speech_audio.push(samples.to_vec());
+            return;
+        }
+        if self.warmup_in_progress {
+            // idle warmup 中は SpeechStarted が上で deferred 状態へ切り替えるまで
+            // 入力を ASR に渡さない。
+            return;
+        }
         match self.session.state() {
-            SessionState::Listening | SessionState::Holding | SessionState::Failed => {
+            SessionState::Listening | SessionState::Failed => {
                 self.preroll.push(samples);
             }
             SessionState::Connecting => {
                 self.queue_pending_audio(samples_to_bytes(samples));
             }
             SessionState::Streaming => {
-                self.send_audio(samples);
+                if self.server_audio_paused {
+                    // `<end>` の後に無音を送り続けると、サーバー側が同じ入力を
+                    // 新しい空発話として終話し続ける。次の SpeechStarted に備え
+                    // て、容量が限られたプリロールだけを保つ。
+                    self.preroll.push(samples);
+                } else {
+                    self.send_audio(samples);
+                }
             }
             // 接続を閉じている間も音声は捨てない。ここで捨てると、閉じている
             // 最中に話し始めた分がプリロールにも残らず、次の接続の先頭が欠ける。
@@ -695,6 +1470,7 @@ impl Controller {
     }
 
     fn start_asr(&mut self, preroll: Vec<i16>) -> anyhow::Result<()> {
+        self.server_audio_paused = false;
         let endpoint = self.provider.endpoint(&self.settings.core)?;
 
         let config_key = endpoint
@@ -702,18 +1478,13 @@ impl Controller {
             .is_empty()
             .then(|| endpoint.api_key.clone())
             .flatten();
-        let mut config = AsrConfig::realtime_pcm16k(config_key)
-            .with_endpoint_mode(&self.settings.endpoint_mode)
-            .with_endpoint_tuning(EndpointTuning {
-                max_delay_ms: self.settings.endpoint_max_delay_ms,
-                sensitivity: self.settings.endpoint_sensitivity,
-                latency_level: self.settings.endpoint_latency_level,
-            });
+        let mut config =
+            AsrConfig::realtime_pcm16k(config_key).with_endpoint_mode(&self.settings.endpoint_mode);
         config.language_hints = self.settings.language_hints.clone();
         let (to_asr, commands) = crossbeam_channel::unbounded();
         let (events, asr_events) = crossbeam_channel::unbounded();
         let asr_thread =
-            AsrSession::spawn(endpoint.url, config, endpoint.headers, commands, events);
+            AsrSession::spawn(endpoint.url, config, endpoint.headers, commands, events)?;
 
         self.active_api_key = endpoint.api_key;
         self.asr_closing = false;
@@ -721,22 +1492,31 @@ impl Controller {
         self.asr_events = Some(asr_events);
         self.asr_thread = Some(asr_thread);
         self.pending_audio.clear();
+        self.pending_audio_dropped_frames = 0;
+        self.facts.error = None;
+        self.facts.notice = None;
         if !preroll.is_empty() {
             self.pending_audio.push(samples_to_bytes(&preroll));
         }
-        self.overlay_error_until = None;
-        self.set_overlay(OverlayView::Shown {
-            kind: OverlayKind::Connecting,
-            committed: String::new(),
-            partial: String::new(),
-            error: String::new(),
-        });
+        self.splash_started_at = None;
+        self.refresh_overlay();
         self.send_ui(UiUpdate::State(SessionState::Connecting));
         Ok(())
     }
 
     fn queue_pending_audio(&mut self, bytes: Vec<u8>) {
         if self.pending_audio.len() >= PENDING_AUDIO_LIMIT {
+            self.pending_audio_dropped_frames += 1;
+            if self.pending_audio_dropped_frames == 1
+                || self.pending_audio_dropped_frames.is_multiple_of(10)
+            {
+                tracing::warn!(
+                    target: "otoa_input",
+                    pending_limit = PENDING_AUDIO_LIMIT,
+                    dropped_frames = self.pending_audio_dropped_frames,
+                    "ASR connection is not ready; dropping oldest pending audio frame"
+                );
+            }
             self.pending_audio.remove(0);
         }
         self.pending_audio.push(bytes);
@@ -779,6 +1559,124 @@ impl Controller {
         }
         true
     }
+
+    fn start_server_response_wait(&mut self) {
+        if !self.facts.pending.is_empty() {
+            return;
+        }
+        let wait = Wait {
+            epoch: self.epoch,
+            started_at: Instant::now(),
+        };
+        self.facts.pending.push_back(wait);
+        self.sync_pending_wait_observer();
+        tracing::debug!(
+            target: "otoa_input",
+            epoch = wait.epoch,
+            pending = self.facts.pending.len(),
+            "サーバー応答待ちを積んだ"
+        );
+    }
+
+    /// 発話が次へ進んでも、既に表示しているサーバー応答待ちを保持したことを記録する。
+    /// gate event ごとに高頻度で出るものではないため、再表示・タイマー再始動の抑制を
+    /// 実機ログから追える。
+    fn log_server_response_wait_kept(&self, reason: &'static str) {
+        let Some(wait) = self.facts.pending.front() else {
+            return;
+        };
+        let elapsed = wait.started_at.elapsed();
+        let phase = if elapsed >= SERVER_RESPONSE_STARTING_OVERLAY_DELAY {
+            "server-starting"
+        } else if elapsed >= SERVER_RESPONSE_WAITING_OVERLAY_DELAY {
+            "recognizing"
+        } else {
+            "pending"
+        };
+        tracing::info!(
+            target: "otoa_input",
+            epoch = wait.epoch,
+            elapsed_ms = elapsed.as_millis() as u64,
+            phase,
+            reason,
+            "overlay: waiting kept"
+        );
+    }
+
+    /// 確定応答が来たので待ちを解く。**行列を空にする**(1 対 1 ではないため)。
+    fn complete_pending_wait(&mut self, reason: &'static str) -> bool {
+        let Some(wait) = self.facts.pending.pop_front() else {
+            self.sync_pending_wait_observer();
+            return false;
+        };
+        self.facts.pending.clear();
+        tracing::debug!(
+            target: "otoa_input",
+            epoch = wait.epoch,
+            elapsed_ms = wait.started_at.elapsed().as_millis() as u64,
+            remaining = 0,
+            reason,
+            "サーバー応答待ちが解けた"
+        );
+        self.sync_pending_wait_observer();
+        true
+    }
+
+    /// セッションの終了・切断時には、対応先を失った待機をすべて取り除く。
+    fn clear_pending_waits(&mut self, reason: &'static str) {
+        if !self.facts.pending.is_empty() {
+            tracing::debug!(
+                target: "otoa_input",
+                pending = self.facts.pending.len(),
+                reason,
+                "サーバー応答待ちを空にした"
+            );
+        }
+        self.facts.pending.clear();
+        self.pending_completed_by_final_text = false;
+        self.pending_completed_by_endpoint = false;
+        self.sync_pending_wait_observer();
+    }
+
+    /// 100 ms tick と既存テストからの明示的な再評価口。表示の選択は `view` だけが行う。
+    fn check_server_response_wait_overlay(&mut self) {
+        self.import_pending_wait_override_for_test();
+        self.render_overlay();
+        self.sync_pending_wait_observer();
+    }
+
+    #[cfg(test)]
+    fn import_pending_wait_override_for_test(&mut self) {
+        let Some(started_at) = self.server_response_wait_started_at else {
+            return;
+        };
+        match self.facts.pending.front_mut() {
+            Some(wait) => wait.started_at = started_at,
+            None => self.facts.pending.push_back(Wait {
+                epoch: self.epoch,
+                started_at,
+            }),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn import_pending_wait_override_for_test(&mut self) {}
+
+    #[cfg(test)]
+    fn sync_pending_wait_observer(&mut self) {
+        self.server_response_wait_started_at =
+            self.facts.pending.front().map(|wait| wait.started_at);
+        self.server_response_wait_overlay_visible = matches!(
+            view(&self.facts, Instant::now()),
+            OverlayView::Shown {
+                kind: OverlayKind::WaitingForResponse | OverlayKind::StartingServer,
+                ..
+            }
+        );
+    }
+
+    #[cfg(not(test))]
+    fn sync_pending_wait_observer(&mut self) {}
 
     fn send_stop(&mut self) {
         if let Some(to_asr) = self.to_asr.clone() {
@@ -839,6 +1737,11 @@ impl Controller {
     }
 
     fn handle_asr_event(&mut self, event: AsrEvent) {
+        if !matches!(&event, AsrEvent::Failed(_)) {
+            // 接続確立や文字列・終話の応答が来ていれば、サービスは直近まで使われて
+            // いた。次の発話を 60 秒未満で始める限り、余計な warmup はしない。
+            self.last_successful_asr_response_at = Some(Instant::now());
+        }
         match event {
             AsrEvent::Connected => {
                 if !self.session.apply(SessionInput::Connected) {
@@ -855,7 +1758,12 @@ impl Controller {
                     }
                 }
                 self.send_ui(UiUpdate::State(SessionState::Streaming));
-                self.refresh_overlay();
+                if self.finish_after_deferred_warmup_connect {
+                    self.finish_after_deferred_warmup_connect = false;
+                    self.finish_current_speech();
+                } else {
+                    self.refresh_overlay();
+                }
                 self.log_session_event("Connected");
             }
             AsrEvent::FinalText(tokens) => {
@@ -869,10 +1777,18 @@ impl Controller {
                     );
                     return;
                 }
+                // FinalText はそれ自体がサーバーからの確定応答である。終話の
+                // 印を待つ間、応答待ちの表示を残したままにしない。
+                self.pending_completed_by_endpoint = false;
+                self.pending_completed_by_final_text =
+                    self.complete_pending_wait("final transcript received");
                 self.transcript.push_final(&tokens_to_text(&tokens));
                 self.send_text_update(true);
             }
             AsrEvent::PartialText(tokens) => {
+                // `<end>` の直後の notice だけを抑止する。次の通常応答は必ず
+                // partial（空でもよい）を含むので、ここで次の応答へ進める。
+                self.pending_completed_by_endpoint = false;
                 if self.client_finalize_sent && !self.gate.is_speaking() {
                     tracing::debug!(
                         target: "otoa_input",
@@ -886,16 +1802,37 @@ impl Controller {
                 self.send_text_update(had_commit_hold);
             }
             AsrEvent::Endpoint => {
+                if self.pending_completed_by_final_text {
+                    self.pending_completed_by_final_text = false;
+                    self.pending_completed_by_endpoint = true;
+                } else {
+                    self.pending_completed_by_endpoint =
+                        self.complete_pending_wait("endpoint received");
+                }
                 self.finalize_pending = false;
                 self.last_speech_endpoint_at = Some(Instant::now());
+                if self.settings.endpoint_mode == "server" && !self.gate.is_speaking() {
+                    // `<end>` を受けた後は次の SpeechStarted まで送信を止める。
+                    // ただし、既に次の発話を拾っている場合は古い `<end>` の可能性
+                    // があるため止めず、その発話を欠かさない。
+                    self.server_audio_paused = true;
+                    self.preroll.clear();
+                    tracing::debug!(target: "otoa_input", "paused server ASR audio after endpoint");
+                }
                 self.log_session_event("SpeechEndpoint");
                 let segment = self.transcript.take_segment();
                 self.commit_segment(segment);
-                if self.committed_hold_until.is_none() && self.overlay_error_until.is_none() {
-                    self.hide_overlay();
+                if self.facts.commit.is_none() && self.facts.error.is_none() {
+                    self.clear_overlay_facts();
+                    self.refresh_overlay();
                 }
             }
             AsrEvent::FinalizeDone => {
+                if self.pending_completed_by_final_text {
+                    self.pending_completed_by_final_text = false;
+                } else {
+                    self.complete_pending_wait("finalize response received");
+                }
                 // endpoint_mode=client では <end> が来ないので、ここで区切り時刻を更新する。
                 // 更新しないと last_speech_endpoint_at が発話開始のまま止まり、
                 // idle_close_sec を過ぎた後は毎周期 finalize を送り続ける。
@@ -904,17 +1841,18 @@ impl Controller {
                 self.log_session_event("FinalizeDone");
                 let segment = self.transcript.take_segment();
                 self.commit_segment(segment);
-                if self.committed_hold_until.is_none() {
+                if self.facts.commit.is_none() {
                     self.refresh_overlay();
                 }
             }
             AsrEvent::Finished => {
+                self.clear_pending_waits("session finished");
                 self.finalize_pending = false;
                 self.asr_closing = true;
                 self.log_session_event("Finished");
                 let segment = self.transcript.take_segment();
                 self.commit_segment(segment);
-                if self.committed_hold_until.is_none() {
+                if self.facts.commit.is_none() {
                     self.refresh_overlay();
                 }
                 if self.session.apply(SessionInput::Finished) {
@@ -923,9 +1861,19 @@ impl Controller {
                     self.cleanup_asr();
                     self.resume_after_finished();
                     self.apply_pending_settings();
+                    self.refresh_overlay();
+                }
+            }
+            AsrEvent::Notice { code, message } => {
+                if self.pending_completed_by_endpoint {
+                    self.pending_completed_by_endpoint = false;
+                    self.show_overlay_notice_after_response(code, message);
+                } else {
+                    self.show_overlay_notice(code, message);
                 }
             }
             AsrEvent::Failed(error) => {
+                self.complete_pending_wait("ASR error received");
                 if is_nonfatal_asr_error(&error) {
                     if self.asr_closing || self.session.state() == SessionState::Closing {
                         tracing::debug!("ASR connection closed during normal shutdown: {error}");
@@ -949,10 +1897,11 @@ impl Controller {
         {
             return;
         }
-        self.hide_overlay();
+        self.clear_overlay_facts();
         self.send_ui(UiUpdate::State(self.session.state()));
         self.resume_after_finished();
         self.apply_pending_settings();
+        self.refresh_overlay();
     }
 
     fn abort_asr_session(&mut self, error: AsrError) {
@@ -963,10 +1912,11 @@ impl Controller {
         if !self.session.apply(SessionInput::Aborted) {
             return;
         }
-        self.hide_overlay();
+        self.clear_overlay_facts();
         self.send_ui(UiUpdate::State(SessionState::Listening));
         self.resume_after_finished();
         self.apply_pending_settings();
+        self.refresh_overlay();
     }
 
     fn resume_after_finished(&mut self) {
@@ -1010,16 +1960,16 @@ impl Controller {
         self.check_splash_timeout();
         self.check_overlay_timeout();
         self.check_commit_hold_timeout();
-        if self.session.state() != SessionState::Streaming {
-            return;
-        }
-
-        let Some(last_speech_endpoint_at) = self.last_speech_endpoint_at else {
-            return;
-        };
-        if last_speech_endpoint_at.elapsed()
-            <= Duration::from_secs(self.settings.idle_close_sec as u64)
-        {
+        self.check_server_response_wait_overlay();
+        self.start_idle_warmup_if_due();
+        if !idle_close_is_due(
+            self.session.state(),
+            self.gate.is_speaking(),
+            !self.facts.pending.is_empty(),
+            self.last_speech_endpoint_at,
+            self.settings.idle_close_sec,
+            Instant::now(),
+        ) {
             return;
         }
 
@@ -1031,8 +1981,9 @@ impl Controller {
             self.log_session_event("IdleTimeout");
             self.last_speech_endpoint_at = None;
             self.closing_started_at = Some(Instant::now());
-            self.hide_overlay();
+            self.clear_overlay_facts();
             self.send_ui(UiUpdate::State(SessionState::Closing));
+            self.refresh_overlay();
         }
     }
 
@@ -1081,20 +2032,21 @@ impl Controller {
         self.failed_at = None;
         self.failed_recovery_enabled = false;
         self.failed_retry_delay = next_failed_retry_delay(retry_delay);
-        self.hide_overlay();
+        self.clear_overlay_facts();
         self.send_ui(UiUpdate::State(SessionState::Listening));
         tracing::info!("session recovered to Listening");
         self.resume_after_finished();
         self.apply_pending_settings();
+        self.refresh_overlay();
     }
 
     fn reset_after_session_timeout(&mut self) {
         self.send_stop();
         self.cleanup_asr();
-        self.hide_overlay();
         if !self.session.apply(SessionInput::Timeout) {
             return;
         }
+        self.clear_overlay_facts();
         self.send_ui(UiUpdate::State(SessionState::Listening));
         self.reset_vad_state();
         if self.audio_capture.is_none() {
@@ -1104,6 +2056,7 @@ impl Controller {
             }
         }
         self.apply_pending_settings();
+        self.refresh_overlay();
     }
 
     fn commit_segment(&mut self, segment: Option<String>) {
@@ -1133,6 +2086,17 @@ impl Controller {
         self.show_committed_text(text.clone());
         if let Err(error) = self.text_out.emit(&text, PasteMethod::ClipboardAndPaste) {
             self.report_error(format!("failed to output transcript: {error:#}"));
+        }
+        // 利用者が体感する遅延。起点は「最後に確実に声だったフレーム」であって、
+        // `vad edge`(閾値 0.5 を割った瞬間)ではない。ここを取り違えると、
+        // 報告値と体感が食い違う。
+        if let Some(spoke_at) = self.last_confident_speech_at.take() {
+            tracing::info!(
+                target: "otoa_input",
+                total_ms = spoke_at.elapsed().as_millis() as u64,
+                chars = text.chars().count(),
+                "user latency: last confident speech -> pasted"
+            );
         }
     }
 
@@ -1208,25 +2172,45 @@ impl Controller {
     }
 
     fn check_overlay_timeout(&mut self) {
+        self.import_display_deadline_overrides_for_test();
+        let now = Instant::now();
+        let mut changed = false;
+        if matches!(
+            self.facts.error,
+            Some(UserError::Temporary { until, .. }) if now >= until
+        ) {
+            self.facts.error = None;
+            changed = true;
+        }
         if self
-            .overlay_error_until
-            .is_some_and(|deadline| Instant::now() >= deadline)
+            .facts
+            .notice
+            .as_ref()
+            .is_some_and(|notice| now >= notice.until)
         {
-            self.hide_overlay();
+            self.facts.notice = None;
+            changed = true;
+        }
+        if changed {
+            self.render_overlay();
         }
     }
 
     fn check_commit_hold_timeout(&mut self) {
+        self.import_display_deadline_overrides_for_test();
         if self
-            .committed_hold_until
-            .is_some_and(|deadline| Instant::now() >= deadline)
+            .facts
+            .commit
+            .as_ref()
+            .is_some_and(|(_, deadline)| Instant::now() >= *deadline)
         {
-            self.hide_overlay();
+            self.facts.commit = None;
+            self.render_overlay();
         }
     }
 
     fn check_splash_timeout(&mut self) {
-        if !matches!(self.overlay, OverlayView::Splash) {
+        if self.splash_started_at.is_none() {
             return;
         }
         if self.splash_started_at.is_none_or(|started| {
@@ -1239,58 +2223,81 @@ impl Controller {
         if self.connection_needs_attention() {
             self.require_connection();
         } else {
-            self.hide_overlay();
+            self.render_overlay();
         }
     }
 
     fn show_overlay_error(&mut self, message: String) {
+        let until = Instant::now() + OVERLAY_ERROR_DURATION;
         self.splash_started_at = None;
-        self.overlay_error_until = Some(Instant::now() + OVERLAY_ERROR_DURATION);
-        self.set_overlay(OverlayView::Shown {
-            kind: OverlayKind::Error,
-            committed: String::new(),
-            partial: String::new(),
-            error: message,
+        self.facts.notice = None;
+        self.facts.error = Some(UserError::Temporary { message, until });
+        self.refresh_overlay();
+    }
+
+    fn show_overlay_notice(&mut self, code: String, message: String) {
+        self.complete_pending_wait("notice received");
+        self.show_overlay_notice_after_response(code, message);
+    }
+
+    fn show_overlay_notice_after_response(&mut self, code: String, message: String) {
+        let message = self.sanitize_message(message);
+        let until = Instant::now() + OVERLAY_NOTICE_DURATION;
+        self.splash_started_at = None;
+        self.facts.error = None;
+        self.facts.commit = None;
+        self.facts.notice = Some(Notice {
+            kind: NoticeKind::Asr,
+            message,
+            until,
         });
+        tracing::info!(target: "otoa_input", notice_code = %code, "ASR notice");
+        self.refresh_overlay();
     }
 
     fn show_persistent_overlay_error(&mut self, message: String) {
+        self.clear_pending_waits("persistent error shown");
         self.splash_started_at = None;
-        self.overlay_error_until = None;
-        self.set_overlay(OverlayView::Shown {
+        self.facts.notice = None;
+        self.facts.error = Some(UserError::Persistent {
             kind: OverlayKind::Error,
-            committed: String::new(),
-            partial: String::new(),
-            error: format!("{message}\nクリックで再試行"),
+            message: format!("{message}\nクリックで再試行"),
         });
+        self.refresh_overlay();
     }
 
-    fn hide_overlay(&mut self) {
-        self.overlay_error_until = None;
+    /// セッション切替時に、期限付きの可視理由を Facts から取り除く。
+    fn clear_overlay_facts(&mut self) {
         self.splash_started_at = None;
-        self.committed_hold_until = None;
-        self.set_overlay(OverlayView::Hidden);
+        self.facts.error = None;
+        self.facts.notice = None;
+        self.facts.commit = None;
     }
 
     fn clear_commit_hold(&mut self) -> bool {
-        self.committed_hold_until.take().is_some()
+        let was_present = self.facts.commit.is_some();
+        self.facts.commit = None;
+        was_present
+    }
+
+    fn clear_overlay_notice(&mut self) -> bool {
+        let was_present = self.facts.notice.is_some();
+        self.facts.notice = None;
+        was_present
     }
 
     fn show_committed_text(&mut self, text: String) {
         if self.settings.commit_hold_ms == 0 {
-            self.hide_overlay();
+            self.facts.commit = None;
+            self.refresh_overlay();
             return;
         }
-        self.overlay_error_until = None;
+        let until = Instant::now() + Duration::from_millis(u64::from(self.settings.commit_hold_ms));
         self.splash_started_at = None;
-        self.committed_hold_until =
-            Some(Instant::now() + Duration::from_millis(u64::from(self.settings.commit_hold_ms)));
-        self.set_overlay(OverlayView::Shown {
-            kind: OverlayKind::Committed,
-            committed: text,
-            partial: String::new(),
-            error: String::new(),
-        });
+        self.facts.error = None;
+        self.facts.notice = None;
+        self.facts.commit = Some((text, until));
+        self.refresh_overlay();
     }
 
     fn login_required(&self) -> bool {
@@ -1309,43 +2316,74 @@ impl Controller {
     }
 
     fn refresh_overlay(&mut self) {
-        if self.overlay_error_until.is_some() {
-            return;
-        }
-        if self.committed_hold_until.is_some() {
-            return;
-        }
-        let view = if self.session.state() == SessionState::Connecting {
-            OverlayView::Shown {
-                kind: OverlayKind::Connecting,
-                committed: String::new(),
-                partial: String::new(),
-                error: String::new(),
-            }
-        } else if self.session.state() == SessionState::Streaming
-            && (self.gate.is_speaking() || self.finalize_pending || !self.transcript.is_empty())
-        {
-            // 発話中は「聞き取り中」、finalize の結果待ちは「文字にしています」。
-            // 結果待ちを表示しないと、話し終わってから貼り付くまでの
-            // 数百ミリ秒〜1 秒、窓が消えて止まったように見える。
-            let kind = if self.gate.is_speaking() {
-                OverlayKind::Recognizing
-            } else if self.finalize_pending {
-                OverlayKind::Finalizing
-            } else {
-                OverlayKind::Recognizing
-            };
-            OverlayView::Shown {
-                kind,
-                committed: self.transcript.committed().to_string(),
-                partial: self.transcript.partial().to_string(),
-                error: String::new(),
-            }
-        } else {
-            OverlayView::Hidden
-        };
-        self.set_overlay(view);
+        // splash は通常イベント後に表示対象ではなくなる。接続 readiness の
+        // 確認タイマーも従来どおり停止する。
+        self.splash_started_at = None;
+        self.render_overlay();
     }
+
+    /// 表示に依存する実行時の事実だけを更新する。期限・待機列はここで復元せず、
+    /// それぞれのイベントが Facts を直接更新する。
+    fn refresh_runtime_facts(&mut self) {
+        self.facts.session = self.session.state();
+        self.facts.gate = if self.gate.is_speaking() {
+            GateState::Speaking
+        } else {
+            GateState::Idle
+        };
+        self.facts.warmup = self
+            .warmup_in_progress
+            .then_some(self.warmup_started_at.unwrap_or_else(Instant::now));
+
+        self.facts.partial =
+            (!self.transcript.partial().is_empty()).then(|| self.transcript.partial().to_string());
+        self.facts.finalizing = self.finalize_pending;
+    }
+
+    fn render_overlay(&mut self) {
+        self.refresh_runtime_facts();
+        self.set_overlay(view(&self.facts, Instant::now()));
+        self.sync_display_deadline_observer();
+        self.sync_pending_wait_observer();
+    }
+
+    #[cfg(test)]
+    fn import_display_deadline_overrides_for_test(&mut self) {
+        if let (Some(until), Some((_, fact_until))) =
+            (self.committed_hold_until, self.facts.commit.as_mut())
+        {
+            *fact_until = until;
+        }
+        if let (Some(until), Some(notice)) = (self.overlay_notice_until, self.facts.notice.as_mut())
+        {
+            notice.until = until;
+        }
+        if let (
+            Some(until),
+            Some(UserError::Temporary {
+                until: fact_until, ..
+            }),
+        ) = (self.overlay_error_until, self.facts.error.as_mut())
+        {
+            *fact_until = until;
+        }
+    }
+
+    #[cfg(not(test))]
+    fn import_display_deadline_overrides_for_test(&mut self) {}
+
+    #[cfg(test)]
+    fn sync_display_deadline_observer(&mut self) {
+        self.committed_hold_until = self.facts.commit.as_ref().map(|(_, until)| *until);
+        self.overlay_notice_until = self.facts.notice.as_ref().map(|notice| notice.until);
+        self.overlay_error_until = match self.facts.error.as_ref() {
+            Some(UserError::Temporary { until, .. }) => Some(*until),
+            Some(UserError::Persistent { .. }) | None => None,
+        };
+    }
+
+    #[cfg(not(test))]
+    fn sync_display_deadline_observer(&mut self) {}
 
     fn set_overlay(&mut self, view: OverlayView) {
         if self.overlay == view {
@@ -1364,7 +2402,7 @@ impl Controller {
     }
 
     fn send_route_update_for(&self, settings: &Settings) {
-        let Ok(endpoint) = self.provider.endpoint(&settings.core) else {
+        let Ok(endpoint) = self.provider.endpoint_hint(&settings.core) else {
             return;
         };
         let Ok(url) = Url::parse(&endpoint.url) else {
@@ -1518,6 +2556,7 @@ impl Controller {
     }
 
     fn request_shutdown(&mut self) {
+        self.cancel_warmup();
         let was_closing = self.session.state() == SessionState::Closing;
         self.disable_listening();
         if was_closing {
@@ -1527,14 +2566,17 @@ impl Controller {
     }
 
     fn cleanup_asr(&mut self) {
+        self.clear_pending_waits("ASR session cleaned up");
         self.finalize_pending = false;
         self.client_finalize_sent = false;
+        self.server_audio_paused = false;
         self.to_asr = None;
         self.asr_events = None;
         if let Some(session_thread) = self.asr_thread.take() {
             let _ = session_thread.join();
         }
         self.pending_audio.clear();
+        self.pending_audio_dropped_frames = 0;
         self.active_api_key = None;
         self.session_started_at = None;
         self.connecting_started_at = None;
@@ -1557,8 +2599,38 @@ fn next_failed_retry_delay(current: Duration) -> Duration {
         .min(FAILED_RETRY_MAX)
 }
 
+fn next_enroll_retry_delay(current: Duration) -> Duration {
+    current
+        .checked_mul(2)
+        .unwrap_or(ENROLL_RETRY_MAX)
+        .min(ENROLL_RETRY_MAX)
+}
+
 fn failed_retry_is_due(failed_at: Instant, retry_delay: Duration, now: Instant) -> bool {
     now.duration_since(failed_at) >= retry_delay
+}
+
+/// 無音が続いたので接続を閉じてよいか。
+///
+/// **応答をまだ待っている間は閉じない。** 2026-08-25 の実機で、喋り終わってから
+/// 15 秒(`idle_close_sec` の既定)でセッションを閉じてしまい、背後の
+/// コールドスタート(30〜60 秒)が終わる前に諦めていた。閉じることすら
+/// 完了せず `closing timed out without finished` になり、未応答の待ちが
+/// 破棄されていた。待ちが残っている限り、この経路で閉じてはならない。
+fn idle_close_is_due(
+    state: SessionState,
+    gate_is_speaking: bool,
+    has_pending_response: bool,
+    last_speech_endpoint_at: Option<Instant>,
+    idle_close_sec: u32,
+    now: Instant,
+) -> bool {
+    state == SessionState::Streaming
+        && !gate_is_speaking
+        && !has_pending_response
+        && last_speech_endpoint_at.is_some_and(|last_endpoint| {
+            now.duration_since(last_endpoint) > Duration::from_secs(u64::from(idle_close_sec))
+        })
 }
 
 fn is_nonfatal_asr_error(error: &AsrError) -> bool {
@@ -1580,12 +2652,18 @@ fn is_user_action_failure_message(message: &str) -> bool {
         GATEWAY_URL_MISSING_MESSAGE
             | "サーバー URL を設定してください"
             | "音声認識の認証情報が設定されていません"
-    )
+    ) || message.starts_with("声の登録が必要です。")
+        || message.starts_with("参照音声が見つかりません。")
+        || message.starts_with("声の登録の準備に失敗しました。")
 }
 
+/// server endpoint でも無音の待機時間を短縮しない。100 ms の上限では、VAD 確率が
+/// 境界付近で振動しただけで再武装して連続した SpeechEnded を起こすため、
+/// endpoint の担当にかかわらず設定した `vad_min_silence_ms` をそのまま使う。
 fn gate_from_settings(settings: &Settings) -> SpeechGate {
     SpeechGate::new(
         settings.vad_threshold,
+        settings.vad_release_threshold,
         milliseconds_to_frames(settings.vad_min_speech_ms),
         milliseconds_to_frames(settings.vad_min_silence_ms),
     )
@@ -1681,15 +2759,26 @@ fn is_loopback_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_input_gain, combine_readiness, failed_retry_is_due, is_loopback_host,
-        is_nonfatal_asr_error, level_status, next_failed_retry_delay, resolve_paste_shortcut,
-        Controller, LevelStatus, OverlayKind, OverlayView, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
-        GATEWAY_URL_MISSING_MESSAGE,
+        apply_input_gain, combine_readiness, failed_retry_is_due, gate_from_settings,
+        idle_close_is_due, is_loopback_host, is_nonfatal_asr_error, is_user_action_failure_message,
+        level_status, next_enroll_retry_delay, next_failed_retry_delay, resolve_paste_shortcut,
+        Controller, LevelStatus, OverlayKind, OverlayView, WarmupReason, WarmupResult,
+        ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
+        GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION, PENDING_AUDIO_LIMIT,
+        SERVER_RESPONSE_STARTING_OVERLAY_DELAY, SERVER_RESPONSE_WAITING_OVERLAY_DELAY,
+        WARMUP_IDLE_THRESHOLD,
     };
     use crate::connection::SelfHostedProvider;
     use crate::settings::Settings;
-    use otoa_input_core::{GateEvent, PasteShortcutSetting, Readiness, SessionInput, SessionState};
+    use otoa_input_core::{
+        Account, ConnectionProvider, Endpoint, EnrollOutcome, EnrollReason, GateEvent,
+        PasteShortcutSetting, PrepareAction, Readiness, SessionInput, SessionState,
+    };
     use otoa_input_protocol::{AsrCommand, AsrError, AsrEvent, AsrToken};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
     use std::time::{Duration, Instant};
     use url::Url;
 
@@ -1716,6 +2805,404 @@ mod tests {
 
     fn test_controller(settings: Settings) -> Controller {
         test_controller_with_failure(settings, None)
+    }
+
+    struct WarmupProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ConnectionProvider for WarmupProvider {
+        fn endpoint(&self, _settings: &otoa_input_core::Settings) -> anyhow::Result<Endpoint> {
+            Ok(Endpoint {
+                url: "ws://127.0.0.1:8770/asr/v1".to_string(),
+                headers: Vec::new(),
+                api_key: None,
+            })
+        }
+
+        fn supports_warmup(&self, _settings: &otoa_input_core::Settings) -> bool {
+            true
+        }
+
+        fn warmup(&self, _settings: &otoa_input_core::Settings) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn readiness(&self) -> Readiness {
+            Readiness::Ready
+        }
+
+        fn prepare(&self) -> Option<PrepareAction> {
+            None
+        }
+
+        fn authenticate(&self, _cancelled: &AtomicBool) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn logout(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn account(&self) -> Option<Account> {
+            None
+        }
+
+        fn update_settings(
+            &self,
+            _settings: &otoa_input_core::Settings,
+            _product_settings: Option<&serde_json::Value>,
+        ) {
+        }
+    }
+
+    struct RetryableEnrollmentProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ConnectionProvider for RetryableEnrollmentProvider {
+        fn endpoint(&self, _settings: &otoa_input_core::Settings) -> anyhow::Result<Endpoint> {
+            Ok(Endpoint {
+                url: "ws://127.0.0.1:8770/asr/v1".to_string(),
+                headers: Vec::new(),
+                api_key: None,
+            })
+        }
+
+        fn enrollment_is_eligible(&self, _settings: &otoa_input_core::Settings) -> bool {
+            true
+        }
+
+        fn ensure_enrolled(
+            &self,
+            _settings: &otoa_input_core::Settings,
+            _reason: EnrollReason,
+        ) -> EnrollOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            EnrollOutcome::RetryableRemote("gateway timed out while starting".to_string())
+        }
+
+        fn readiness(&self) -> Readiness {
+            Readiness::Ready
+        }
+
+        fn prepare(&self) -> Option<PrepareAction> {
+            None
+        }
+
+        fn authenticate(&self, _cancelled: &AtomicBool) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn logout(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn account(&self) -> Option<Account> {
+            None
+        }
+
+        fn update_settings(
+            &self,
+            _settings: &otoa_input_core::Settings,
+            _product_settings: Option<&serde_json::Value>,
+        ) {
+        }
+    }
+
+    struct MissingEnrollmentProvider;
+
+    impl ConnectionProvider for MissingEnrollmentProvider {
+        fn endpoint(&self, _settings: &otoa_input_core::Settings) -> anyhow::Result<Endpoint> {
+            Ok(Endpoint {
+                url: "ws://127.0.0.1:8770/asr/v1".to_string(),
+                headers: Vec::new(),
+                api_key: None,
+            })
+        }
+
+        fn ensure_enrolled(
+            &self,
+            _settings: &otoa_input_core::Settings,
+            _reason: EnrollReason,
+        ) -> EnrollOutcome {
+            EnrollOutcome::NeedsUserAction(
+                "声の登録が必要です。設定の「声」で参照音声を録音してから、もう一度話してください。"
+                    .to_string(),
+            )
+        }
+
+        fn readiness(&self) -> Readiness {
+            Readiness::Ready
+        }
+
+        fn prepare(&self) -> Option<PrepareAction> {
+            None
+        }
+
+        fn authenticate(&self, _cancelled: &AtomicBool) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn logout(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn account(&self) -> Option<Account> {
+            None
+        }
+
+        fn update_settings(
+            &self,
+            _settings: &otoa_input_core::Settings,
+            _product_settings: Option<&serde_json::Value>,
+        ) {
+        }
+    }
+
+    fn controller_with_provider(
+        settings: Settings,
+        provider: Arc<dyn ConnectionProvider>,
+    ) -> Controller {
+        let (to_ui, _ui_rx) = crossbeam_channel::bounded(8);
+        let (audio_sink, _audio_rx) = crossbeam_channel::bounded(8);
+        let (vad_control, _vad_control_rx) = crossbeam_channel::bounded(8);
+        let (_vad_event_tx, vad_events) = crossbeam_channel::bounded(8);
+        Controller::new(
+            settings,
+            provider,
+            None,
+            to_ui,
+            audio_sink,
+            vad_control,
+            vad_events,
+        )
+        .expect("controller should initialize for the enrollment test")
+    }
+
+    fn warmup_controller(settings: Settings) -> (Controller, Arc<AtomicUsize>) {
+        let (to_ui, _ui_rx) = crossbeam_channel::bounded(8);
+        let (audio_sink, _audio_rx) = crossbeam_channel::bounded(8);
+        let (vad_control, _vad_control_rx) = crossbeam_channel::bounded(8);
+        let (_vad_event_tx, vad_events) = crossbeam_channel::bounded(8);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(WarmupProvider {
+            calls: Arc::clone(&calls),
+        });
+        let controller = Controller::new(
+            settings,
+            provider,
+            None,
+            to_ui,
+            audio_sink,
+            vad_control,
+            vad_events,
+        )
+        .expect("controller should initialize for the warmup test");
+        (controller, calls)
+    }
+
+    fn wait_for_warmup(controller: &mut Controller) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while controller.warmup_in_progress && Instant::now() < deadline {
+            controller.drain_warmup_events();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            !controller.warmup_in_progress,
+            "warmup worker did not report completion"
+        );
+    }
+
+    #[test]
+    fn startup_warmup_shows_the_warming_overlay_until_it_finishes() {
+        let (mut controller, calls) = warmup_controller(Settings::default());
+
+        assert!(controller.start_warmup(WarmupReason::Startup));
+        assert!(controller.warmup_in_progress);
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WarmingUp,
+                committed: String::new(),
+                partial: String::new(),
+                error: String::new(),
+            }
+        );
+
+        wait_for_warmup(&mut controller);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(controller.last_successful_asr_response_at.is_some());
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+    }
+
+    #[test]
+    fn speech_after_sixty_seconds_warms_before_opening_a_session() {
+        let (mut controller, calls) = warmup_controller(Settings::default());
+        assert!(controller.session.apply(SessionInput::Enable));
+        controller.last_successful_asr_response_at = Some(Instant::now() - WARMUP_IDLE_THRESHOLD);
+
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+
+        assert!(controller.warmup_in_progress);
+        assert!(controller.discarding_warmup_speech);
+        assert_eq!(controller.session.state(), SessionState::Listening);
+        assert!(controller.to_asr.is_none());
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WarmingUp,
+                ..
+            }
+        ));
+
+        wait_for_warmup(&mut controller);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn idle_warmup_starts_before_the_next_speech() {
+        let (mut controller, calls) = warmup_controller(Settings::default());
+        assert!(controller.session.apply(SessionInput::Enable));
+        controller.last_successful_asr_response_at = Some(Instant::now() - WARMUP_IDLE_THRESHOLD);
+
+        controller.start_idle_warmup_if_due();
+
+        assert!(controller.warmup_in_progress);
+        assert!(!controller.discarding_warmup_speech);
+        assert_eq!(controller.session.state(), SessionState::Listening);
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WarmingUp,
+                ..
+            }
+        ));
+        wait_for_warmup(&mut controller);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn temporary_warmup_failure_returns_to_a_retryable_state() {
+        let (mut controller, _calls) = warmup_controller(Settings::default());
+        controller.warmup_in_progress = true;
+        controller.set_overlay(OverlayView::Shown {
+            kind: OverlayKind::WarmingUp,
+            committed: String::new(),
+            partial: String::new(),
+            error: String::new(),
+        });
+
+        controller.finish_warmup(WarmupResult {
+            reason: WarmupReason::Startup,
+            started_at: Instant::now(),
+            result: Err(anyhow::anyhow!("gateway timed out while starting")),
+        });
+
+        assert!(!controller.warmup_in_progress);
+        assert!(controller.warmup_is_due());
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Error,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retryable_warmup_failure_does_not_retry_again_after_one_hundred_ms() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(RetryableEnrollmentProvider {
+            calls: Arc::clone(&calls),
+        });
+        let mut controller = controller_with_provider(Settings::default(), provider);
+        assert!(controller.session.apply(SessionInput::Enable));
+        let before = Instant::now();
+
+        controller.start_idle_warmup_if_due();
+        wait_for_warmup(&mut controller);
+
+        let retry_at = controller
+            .warmup_retry_at
+            .expect("retryable failure must schedule a retry");
+        assert!(
+            retry_at.duration_since(before) >= ENROLL_RETRY_INITIAL,
+            "retry interval must be at least five seconds"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(controller.facts.error.is_none());
+        assert_eq!(controller.session.state(), SessionState::Listening);
+
+        std::thread::sleep(Duration::from_millis(110));
+        controller.start_idle_warmup_if_due();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the 100 ms controller tick must not start a second enrollment"
+        );
+    }
+
+    #[test]
+    fn enrollment_retry_backoff_is_capped_at_sixty_seconds() {
+        assert_eq!(
+            next_enroll_retry_delay(ENROLL_RETRY_INITIAL),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            next_enroll_retry_delay(Duration::from_secs(40)),
+            ENROLL_RETRY_MAX
+        );
+        assert_eq!(next_enroll_retry_delay(ENROLL_RETRY_MAX), ENROLL_RETRY_MAX);
+    }
+
+    #[test]
+    fn disabled_session_does_not_start_idle_warmup() {
+        let (mut controller, calls) = warmup_controller(Settings::default());
+        assert_eq!(controller.session.state(), SessionState::Disabled);
+
+        controller.start_idle_warmup_if_due();
+
+        assert!(!controller.warmup_in_progress);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn missing_enrollment_is_the_only_persistent_enrollment_error() {
+        let provider = Arc::new(MissingEnrollmentProvider);
+        let mut controller = controller_with_provider(Settings::default(), provider);
+        assert!(controller.session.apply(SessionInput::Enable));
+
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+
+        assert_eq!(controller.session.state(), SessionState::Failed);
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Error,
+                ..
+            }
+        ));
+        controller.check_overlay_timeout();
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Error,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn missing_voice_setup_is_a_user_action_failure() {
+        assert!(is_user_action_failure_message(
+            "声の登録が必要です。設定の「声」で参照音声を録音してから、もう一度話してください。"
+        ));
+        assert!(is_user_action_failure_message(
+            "参照音声が見つかりません。設定の「声」で声を登録し直してから、もう一度話してください。"
+        ));
     }
 
     #[test]
@@ -1772,6 +3259,22 @@ mod tests {
         settings
     }
 
+    #[test]
+    fn server_endpoint_mode_uses_the_configured_min_silence() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 300;
+        });
+        let mut gate = gate_from_settings(&settings);
+
+        assert_eq!(gate.push(1.0), Some(GateEvent::SpeechStarted));
+        for _ in 0..9 {
+            assert_eq!(gate.push(0.0), None);
+        }
+        assert_eq!(gate.push(0.0), Some(GateEvent::SpeechEnded));
+    }
+
     fn asr_token(text: &str, is_final: bool) -> AsrToken {
         AsrToken {
             text: text.to_string(),
@@ -1803,6 +3306,16 @@ mod tests {
     fn end_speech(controller: &mut Controller) {
         assert_eq!(controller.gate.push(0.0), Some(GateEvent::SpeechEnded));
         controller.handle_gate_event(GateEvent::SpeechEnded);
+    }
+
+    fn age_oldest_pending_wait(controller: &mut Controller, elapsed: Duration) {
+        controller
+            .facts
+            .pending
+            .front_mut()
+            .expect("無音の検知で応答待ちが積まれるはず")
+            .started_at = Instant::now() - elapsed;
+        controller.sync_pending_wait_observer();
     }
 
     fn committed_overlay(controller: &Controller) -> (&str, &str) {
@@ -1838,6 +3351,22 @@ mod tests {
         let amplified = apply_input_gain(&samples, 1.0);
         assert!(matches!(amplified, std::borrow::Cow::Borrowed(_)));
         assert_eq!(&*amplified, &samples);
+    }
+
+    #[test]
+    fn pending_audio_limit_keeps_the_newest_frames_and_records_the_drop() {
+        let mut controller = test_controller(Settings::default());
+        for value in 0..=PENDING_AUDIO_LIMIT {
+            controller.queue_pending_audio(vec![value as u8]);
+        }
+
+        assert_eq!(controller.pending_audio.len(), PENDING_AUDIO_LIMIT);
+        assert_eq!(controller.pending_audio.first(), Some(&vec![1]));
+        assert_eq!(
+            controller.pending_audio.last(),
+            Some(&vec![PENDING_AUDIO_LIMIT as u8])
+        );
+        assert_eq!(controller.pending_audio_dropped_frames, 1);
     }
 
     #[test]
@@ -1979,6 +3508,39 @@ mod tests {
     }
 
     #[test]
+    fn notice_is_temporary_and_does_not_change_the_session_or_transcript() {
+        let mut controller = test_controller(Settings::default());
+        assert!(controller.session.apply(SessionInput::Enable));
+        assert!(controller.session.apply(SessionInput::SpeechStarted));
+        assert!(controller.session.apply(SessionInput::Connected));
+
+        controller.handle_asr_event(AsrEvent::Notice {
+            code: "gate_blocked".to_string(),
+            message: "登録した声と一致しませんでした。".to_string(),
+        });
+
+        assert_eq!(controller.session.state(), SessionState::Streaming);
+        assert!(controller.transcript.is_empty());
+        assert!(controller.pending_commit.is_empty());
+        assert!(controller.last_commit.is_none());
+        assert!(matches!(
+            &controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Notice,
+                error,
+                ..
+            } if error == "登録した声と一致しませんでした。"
+        ));
+        assert!(controller.overlay_notice_until.is_some());
+
+        controller.overlay_notice_until = Some(Instant::now() - OVERLAY_NOTICE_DURATION);
+        controller.check_overlay_timeout();
+
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+        assert_eq!(controller.session.state(), SessionState::Streaming);
+    }
+
+    #[test]
     fn next_speech_started_clears_committed_overlay_immediately() {
         let settings = settings_with(|settings| {
             settings.auto_paste = false;
@@ -2103,13 +3665,15 @@ mod tests {
     }
 
     #[test]
-    fn speech_ended_in_server_mode_hides_empty_streaming_overlay() {
+    fn server_mode_hides_empty_streaming_overlay_after_vad() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
         let mut controller = test_controller(settings);
+        let (to_asr, _asr_commands) = crossbeam_channel::unbounded();
+        controller.to_asr = Some(to_asr);
         assert!(controller.session.apply(SessionInput::Enable));
         assert!(controller.session.apply(SessionInput::SpeechStarted));
         assert!(controller.session.apply(SessionInput::Connected));
@@ -2125,7 +3689,509 @@ mod tests {
     }
 
     #[test]
-    fn speech_ended_in_client_mode_shows_finalizing_until_the_result_arrives() {
+    fn server_mode_sends_nothing_when_local_vad_thinks_speech_ended() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+
+        // 端末の VAD が決めてよいのは「話し始め」だけである。発話が
+        // 終わったかどうかは ASR サーバーが判断するので、ここで何かを
+        // 送ってはいけない。送ると端末が判断を肩代わりすることになる。
+        assert!(asr_commands.try_recv().is_err());
+
+        controller.handle_gate_event(GateEvent::SpeechEnded);
+        assert!(asr_commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn ordinary_two_point_five_eight_second_response_never_shows_waiting() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        age_oldest_pending_wait(&mut controller, Duration::from_millis(2_580));
+        controller.check_server_response_wait_overlay();
+
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+    }
+
+    #[test]
+    fn pending_wait_changes_at_four_and_ten_seconds() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        age_oldest_pending_wait(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WaitingForResponse,
+                ..
+            }
+        ));
+
+        age_oldest_pending_wait(&mut controller, SERVER_RESPONSE_STARTING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::StartingServer,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pending_wait_is_not_rewound_when_the_next_speech_starts() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        age_oldest_pending_wait(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        let first_started_at = controller
+            .facts
+            .pending
+            .front()
+            .expect("first wait")
+            .started_at;
+        controller.check_server_response_wait_overlay();
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        assert_eq!(controller.facts.pending.len(), 1);
+        assert_eq!(
+            controller.facts.pending.front().unwrap().started_at,
+            first_started_at
+        );
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WaitingForResponse,
+                ..
+            }
+        ));
+
+        end_speech(&mut controller);
+        // 積み増さない。開始時刻は「待っていない状態から最初に送った時刻」を保つ。
+        assert_eq!(controller.facts.pending.len(), 1);
+        assert_eq!(
+            controller.facts.pending.front().unwrap().started_at,
+            first_started_at
+        );
+    }
+
+    #[test]
+    fn old_response_cannot_pop_the_newer_speech_wait_or_hide_its_overlay() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.auto_paste = false;
+            settings.commit_hold_ms = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        let first_epoch = controller.facts.pending.front().expect("first wait").epoch;
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        end_speech(&mut controller);
+        let second_epoch = controller.facts.pending.front().expect("second wait").epoch;
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("古い結果", true)]));
+        controller.handle_asr_event(AsrEvent::Endpoint);
+
+        // 2026-08-25: 待ちは常に最大 1 件である。端末の VAD が無音を検知しても
+        // サーバーは終話と判断したときだけ返すので、複数回の検知が 1 つの応答に
+        // まとめられる。1 対 1 に数えると行列が伸び続け、先頭が古いまま残って
+        // 待ち表示が消えなくなる(実機で発生)。したがって 2 回目以降は積み増さず、
+        // 応答が来れば空にする。
+        assert_eq!(first_epoch, second_epoch);
+        assert!(controller.facts.pending.is_empty());
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Recognizing,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn server_wait_shows_recognizing_after_one_and_a_half_seconds() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WaitingForResponse,
+                committed: String::new(),
+                partial: String::new(),
+                error: String::new(),
+            }
+        );
+        assert!(controller.server_response_wait_overlay_visible);
+    }
+
+    #[test]
+    fn server_wait_changes_to_starting_server_after_six_and_a_half_seconds() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_STARTING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::StartingServer,
+                ..
+            }
+        ));
+        assert!(controller.server_response_wait_overlay_visible);
+    }
+
+    #[test]
+    fn server_wait_stays_visible_and_keeps_its_start_time_during_the_next_speech() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        let started_at = Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY;
+        controller.server_response_wait_started_at = Some(started_at);
+        controller.check_server_response_wait_overlay();
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+
+        assert_eq!(controller.server_response_wait_started_at, Some(started_at));
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WaitingForResponse,
+                committed: String::new(),
+                partial: String::new(),
+                error: String::new(),
+            }
+        );
+
+        end_speech(&mut controller);
+        assert_eq!(controller.server_response_wait_started_at, Some(started_at));
+    }
+
+    #[test]
+    fn server_starting_wait_never_reverts_to_recognizing_for_a_new_speech() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        let started_at = Instant::now() - SERVER_RESPONSE_STARTING_OVERLAY_DELAY;
+        controller.server_response_wait_started_at = Some(started_at);
+        controller.check_server_response_wait_overlay();
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        end_speech(&mut controller);
+        controller.check_server_response_wait_overlay();
+
+        assert_eq!(controller.server_response_wait_started_at, Some(started_at));
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::StartingServer,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn confirmed_server_transcript_clears_the_waiting_overlay() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+        controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("確定結果", true)]));
+
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
+        assert!(!matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WaitingForResponse | OverlayKind::StartingServer,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn server_response_before_wait_delay_never_shows_a_waiting_overlay() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.handle_asr_event(AsrEvent::Endpoint);
+
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+    }
+
+    #[test]
+    fn server_response_hides_waiting_overlay_after_transcript_commits() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.auto_paste = false;
+            settings.commit_hold_ms = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+
+        controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("確定結果", true)]));
+        controller.handle_asr_event(AsrEvent::Endpoint);
+
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+        assert_eq!(
+            controller
+                .last_commit
+                .as_ref()
+                .map(|(text, _)| text.as_str()),
+            Some("確定結果")
+        );
+    }
+
+    #[test]
+    fn fast_server_response_never_shows_a_waiting_overlay() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.server_response_wait_started_at = Some(
+            Instant::now() - (SERVER_RESPONSE_WAITING_OVERLAY_DELAY - Duration::from_millis(100)),
+        );
+        controller.check_server_response_wait_overlay();
+
+        assert_eq!(controller.overlay, OverlayView::Hidden);
+        assert!(!controller.server_response_wait_overlay_visible);
+    }
+
+    #[test]
+    fn server_response_notice_replaces_the_waiting_overlay() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+        controller.handle_asr_event(AsrEvent::Notice {
+            code: "gate_blocked".to_string(),
+            message: "登録した声と一致しませんでした。".to_string(),
+        });
+
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Notice,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn server_response_error_replaces_the_waiting_overlay() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+        controller.handle_asr_event(AsrEvent::Failed(AsrError::Server {
+            code: 503,
+            error_type: "unavailable".to_string(),
+            message: "starting".to_string(),
+            request_id: None,
+        }));
+
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Error,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn server_mode_pauses_audio_after_endpoint_and_replays_preroll_on_next_speech() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+
+        controller.handle_asr_event(AsrEvent::Endpoint);
+        assert!(controller.server_audio_paused);
+
+        controller.handle_vad_samples(&[101, -202]);
+        assert!(asr_commands.try_recv().is_err());
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+
+        assert!(!controller.server_audio_paused);
+        match asr_commands.try_recv() {
+            Ok(AsrCommand::Audio(bytes)) => {
+                assert_eq!(bytes, vec![101, 0, 54, 255]);
+            }
+            _ => panic!("next speech should resume audio with the saved preroll"),
+        }
+        assert!(asr_commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn server_endpoint_received_during_new_speech_does_not_pause_audio() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+        assert!(controller.gate.is_speaking());
+
+        controller.handle_asr_event(AsrEvent::Endpoint);
+
+        assert!(!controller.server_audio_paused);
+    }
+
+    #[test]
+    fn idle_close_never_fires_while_the_gate_is_speaking() {
+        let now = Instant::now();
+        let old_endpoint = Some(now - Duration::from_secs(16));
+
+        assert!(!idle_close_is_due(
+            SessionState::Streaming,
+            true,
+            false,
+            old_endpoint,
+            15,
+            now
+        ));
+        assert!(idle_close_is_due(
+            SessionState::Streaming,
+            false,
+            false,
+            old_endpoint,
+            15,
+            now
+        ));
+    }
+
+    #[test]
+    fn idle_close_never_fires_while_a_response_is_still_pending() {
+        // 背後のコールドスタートは 30〜60 秒かかる。応答を待っている間に閉じると、
+        // 起きる前に諦めることになり、その発話は永久に返らない。
+        let now = Instant::now();
+        let old_endpoint = Some(now - Duration::from_secs(16));
+
+        assert!(!idle_close_is_due(
+            SessionState::Streaming,
+            false,
+            true,
+            old_endpoint,
+            15,
+            now
+        ));
+    }
+
+    #[test]
+    fn client_mode_shows_finalizing_after_speech_until_the_result_arrives() {
         // 話し終えてから結果が返るまでオーバーレイを隠すと、認識が止まった
         // ように見える。この区間は「文字にしています」を出し続ける。
         let settings = settings_with(|settings| {
@@ -2145,6 +4211,7 @@ mod tests {
         controller.handle_gate_event(GateEvent::SpeechEnded);
 
         assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+        assert!(asr_commands.try_recv().is_err());
         assert_eq!(controller.session.state(), SessionState::Streaming);
         assert!(matches!(
             controller.overlay,
@@ -2294,8 +4361,7 @@ mod tests {
 
     #[test]
     fn loopback_route_detection_rejects_remote_urls() {
-        let parsed = Url::parse("wss://otoa-asr-gateway-xxx.a.run.app/ws/asr")
-            .expect("test URL should parse");
+        let parsed = Url::parse("wss://asr.example.com/ws/asr").expect("test URL should parse");
         assert!(!is_loopback_host(parsed.host_str().unwrap()));
     }
 }

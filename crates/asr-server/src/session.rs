@@ -377,6 +377,8 @@ impl Session {
                         error_type: None,
                         error_message: None,
                         request_id: None,
+                        notice_code: None,
+                        notice_message: None,
                     });
                 }
             }
@@ -450,6 +452,8 @@ impl Session {
             error_type: None,
             error_message: None,
             request_id: None,
+            notice_code: None,
+            notice_message: None,
         });
         self.state = SessionState::Closing;
         action.close_code = Some(1000);
@@ -539,6 +543,8 @@ fn error_response(code: u32, error_type: &str, message: &str) -> AsrResponse {
         error_type: Some(error_type.to_string()),
         error_message: Some(message.to_string()),
         request_id: None,
+        notice_code: None,
+        notice_message: None,
     }
 }
 
@@ -557,6 +563,8 @@ fn response_with_marker(marker: Marker, text: &str) -> AsrResponse {
         error_type: None,
         error_message: None,
         request_id: None,
+        notice_code: None,
+        notice_message: None,
     }
 }
 

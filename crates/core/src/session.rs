@@ -8,8 +8,6 @@ pub enum SessionState {
     Connecting,
     /// ASR 接続先へ音声を送っている。
     Streaming,
-    /// 旧来の状態。現在の controller からは遷移しない。
-    Holding,
     /// 停止要求済み。ASR セッションの完了通知（`finished`）待ち。
     Closing,
     /// 失敗。ユーザー操作か再試行で戻る。
@@ -22,8 +20,6 @@ pub enum SessionInput {
     Disable,
     SpeechStarted,
     Connected,
-    /// 旧来の入力。現在の状態機械からは遷移しない。
-    TrailingDone,
     /// 最後の発話区切り通知から長く経過したので閉じる。
     IdleTimeout,
     Finished,
@@ -72,9 +68,6 @@ impl Session {
             (SessionState::Streaming, SessionInput::IdleTimeout) => SessionState::Closing,
             (SessionState::Streaming, SessionInput::Disable) => SessionState::Closing,
             (SessionState::Streaming, SessionInput::Failed) => SessionState::Failed,
-            (SessionState::Holding, SessionInput::SpeechStarted) => SessionState::Streaming,
-            (SessionState::Holding, SessionInput::Disable) => SessionState::Closing,
-            (SessionState::Holding, SessionInput::Failed) => SessionState::Failed,
             (SessionState::Closing, SessionInput::Disable) => {
                 self.disable_after_close = true;
                 SessionState::Closing
@@ -162,17 +155,6 @@ mod tests {
         assert!(session.apply(SessionInput::IdleTimeout));
         assert_eq!(session.state(), SessionState::Closing);
         assert!(!session.accepts_audio());
-    }
-
-    #[test]
-    fn trailing_done_does_not_enter_holding() {
-        let mut session = Session::new();
-        assert!(session.apply(SessionInput::Enable));
-        assert!(session.apply(SessionInput::SpeechStarted));
-        assert!(session.apply(SessionInput::Connected));
-        assert!(!session.apply(SessionInput::TrailingDone));
-        assert_eq!(session.state(), SessionState::Streaming);
-        assert!(session.accepts_audio());
     }
 
     #[test]

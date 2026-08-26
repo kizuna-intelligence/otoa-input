@@ -169,7 +169,8 @@ mod tests {
             endpoint.headers,
             commands,
             events,
-        );
+        )
+        .expect("ASR session thread should start");
 
         let request = request_receiver
             .recv_timeout(Duration::from_secs(5))

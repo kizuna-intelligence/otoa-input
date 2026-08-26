@@ -36,6 +36,11 @@ const EQ_GAP: f64 = 4.0;
 const TRANSCRIPT_LINE_LIMIT: usize = 26;
 const TRANSCRIPT_MAX_CHARS: usize = TRANSCRIPT_LINE_LIMIT * 2;
 const MOTION_TICK: Duration = Duration::from_millis(33);
+const WARMUP_TITLE: &str = "起動中";
+const WARMUP_SUBTITLE: &str = "まだ話さないでください";
+const WAITING_FOR_RESPONSE_TITLE: &str = "認識中";
+const STARTING_SERVER_TITLE: &str = "サーバーを起動しています";
+const STARTING_SERVER_SUBTITLE: &str = "しばらくお待ちください";
 
 #[derive(Clone, Copy, PartialEq)]
 struct MotionFrame {
@@ -208,7 +213,13 @@ fn sync_motion_ticker(
 fn motion_needs_ticker(mode: OverlayMode, reduce_motion: bool, frame: MotionFrame) -> bool {
     let state_moves = match mode {
         OverlayMode::Shown(OverlayKind::Recognizing) => true,
-        OverlayMode::Shown(OverlayKind::Connecting | OverlayKind::Finalizing) => !reduce_motion,
+        OverlayMode::Shown(
+            OverlayKind::WarmingUp
+            | OverlayKind::Connecting
+            | OverlayKind::Finalizing
+            | OverlayKind::WaitingForResponse
+            | OverlayKind::StartingServer,
+        ) => !reduce_motion,
         _ => false,
     };
     state_moves || frame.appear_scale < 1.0
@@ -372,7 +383,11 @@ fn set_window_bounds(window_id: &WindowId, x: f64, y: f64, width: f64, height: f
 }
 
 fn card_height(mode: OverlayMode, committed: &str, partial: &str, error: &str) -> f64 {
-    if matches!(mode, OverlayMode::Shown(OverlayKind::Error)) || !error.is_empty() {
+    if matches!(
+        mode,
+        OverlayMode::Shown(OverlayKind::Error | OverlayKind::Notice)
+    ) || !error.is_empty()
+    {
         CARD_ERROR_HEIGHT
     } else if has_two_transcript_lines(committed, partial) {
         CARD_TWO_LINE_HEIGHT
@@ -522,8 +537,11 @@ fn status_line(state: UiState, hovered: RwSignal<bool>) -> impl IntoView {
                     mode,
                     OverlayMode::Shown(
                         OverlayKind::Recognizing
+                            | OverlayKind::WarmingUp
                             | OverlayKind::Connecting
                             | OverlayKind::Finalizing
+                            | OverlayKind::WaitingForResponse
+                            | OverlayKind::StartingServer
                     )
                 )
             {
@@ -561,16 +579,18 @@ fn transcript_content(state: UiState, motion: RwSignal<MotionFrame>) -> impl Int
             )
         },
         move |(mode, committed, partial, error, reduce_motion)| match mode {
-            OverlayMode::Shown(OverlayKind::Error) => text(display_error(&error))
-                .style(|style| {
-                    text_style(
-                        style,
-                        theme::text::CAPTION,
-                        theme::text::CAPTION_WEIGHT,
-                        theme::color::INK,
-                    )
-                })
-                .into_any(),
+            OverlayMode::Shown(OverlayKind::Error | OverlayKind::Notice) => {
+                text(display_error(&error))
+                    .style(|style| {
+                        text_style(
+                            style,
+                            theme::text::CAPTION,
+                            theme::text::CAPTION_WEIGHT,
+                            theme::color::INK,
+                        )
+                    })
+                    .into_any()
+            }
             OverlayMode::Shown(OverlayKind::LoginNeeded) => {
                 text("クリックするとブラウザでログインします")
                     .style(|style| {
@@ -583,6 +603,26 @@ fn transcript_content(state: UiState, motion: RwSignal<MotionFrame>) -> impl Int
                     })
                     .into_any()
             }
+            OverlayMode::Shown(OverlayKind::WarmingUp) => text(WARMUP_SUBTITLE)
+                .style(|style| {
+                    text_style(
+                        style,
+                        theme::text::CAPTION,
+                        theme::text::CAPTION_WEIGHT,
+                        theme::color::INK,
+                    )
+                })
+                .into_any(),
+            OverlayMode::Shown(OverlayKind::StartingServer) => text(STARTING_SERVER_SUBTITLE)
+                .style(|style| {
+                    text_style(
+                        style,
+                        theme::text::CAPTION,
+                        theme::text::CAPTION_WEIGHT,
+                        theme::color::INK,
+                    )
+                })
+                .into_any(),
             OverlayMode::Shown(OverlayKind::Recognizing)
             | OverlayMode::Shown(OverlayKind::Finalizing)
             | OverlayMode::Shown(OverlayKind::Committed) => transcript_view(
@@ -719,8 +759,11 @@ fn route_chip_with_visibility(state: UiState, splash: bool) -> impl IntoView {
                     state.overlay_mode.get(),
                     OverlayMode::Shown(
                         OverlayKind::Connecting
+                            | OverlayKind::WarmingUp
                             | OverlayKind::Recognizing
                             | OverlayKind::Finalizing
+                            | OverlayKind::WaitingForResponse
+                            | OverlayKind::StartingServer
                             | OverlayKind::Committed
                     )
                 )
@@ -742,7 +785,13 @@ fn orb_view(state: UiState, motion: RwSignal<MotionFrame>, transparent: bool) ->
         move |(mode, reduce_motion)| {
             if matches!(
                 mode,
-                OverlayMode::Shown(OverlayKind::Recognizing | OverlayKind::Connecting)
+                OverlayMode::Shown(
+                    OverlayKind::Recognizing
+                        | OverlayKind::WarmingUp
+                        | OverlayKind::Connecting
+                        | OverlayKind::WaitingForResponse
+                        | OverlayKind::StartingServer
+                )
             ) && !reduce_motion
             {
                 stack((ring_view(mode, motion, 0), ring_view(mode, motion, 1)))
@@ -765,7 +814,11 @@ fn orb_view(state: UiState, motion: RwSignal<MotionFrame>, transparent: bool) ->
         if matches!(
             mode,
             OverlayMode::Shown(
-                OverlayKind::Recognizing | OverlayKind::Finalizing | OverlayKind::Committed
+                OverlayKind::Recognizing
+                    | OverlayKind::Finalizing
+                    | OverlayKind::WaitingForResponse
+                    | OverlayKind::StartingServer
+                    | OverlayKind::Committed
             )
         ) {
             let shadow = if transparent {
@@ -807,7 +860,12 @@ fn orb_view(state: UiState, motion: RwSignal<MotionFrame>, transparent: bool) ->
 }
 
 fn ring_view(mode: OverlayMode, motion: RwSignal<MotionFrame>, ring_index: usize) -> impl IntoView {
-    let base_alpha = if matches!(mode, OverlayMode::Shown(OverlayKind::Connecting)) {
+    let base_alpha = if matches!(
+        mode,
+        OverlayMode::Shown(
+            OverlayKind::WarmingUp | OverlayKind::Connecting | OverlayKind::StartingServer
+        )
+    ) {
         0.35
     } else {
         0.55
@@ -833,7 +891,9 @@ fn eq_view(state: UiState, motion: RwSignal<MotionFrame>) -> impl IntoView {
         move |mode| {
             if matches!(
                 mode,
-                OverlayMode::Shown(OverlayKind::Error | OverlayKind::LoginNeeded)
+                OverlayMode::Shown(
+                    OverlayKind::Error | OverlayKind::Notice | OverlayKind::LoginNeeded
+                )
             ) {
                 empty().style(|style| style.size(0.0, 0.0)).into_any()
             } else {
@@ -863,10 +923,18 @@ fn eq_bar(state: UiState, motion: RwSignal<MotionFrame>, index: usize, base: f64
         let height = match mode {
             OverlayMode::Shown(OverlayKind::Recognizing) => motion.get().eq_heights[index],
             OverlayMode::Shown(OverlayKind::Committed) => base * 0.35,
-            OverlayMode::Shown(OverlayKind::Error | OverlayKind::LoginNeeded)
+            OverlayMode::Shown(
+                OverlayKind::Error | OverlayKind::Notice | OverlayKind::LoginNeeded,
+            )
             | OverlayMode::Hidden
             | OverlayMode::Splash => 0.0,
-            OverlayMode::Shown(OverlayKind::Connecting | OverlayKind::Finalizing) => {
+            OverlayMode::Shown(
+                OverlayKind::WarmingUp
+                | OverlayKind::Connecting
+                | OverlayKind::Finalizing
+                | OverlayKind::WaitingForResponse
+                | OverlayKind::StartingServer,
+            ) => {
                 if reduce_motion {
                     base
                 } else {
@@ -897,7 +965,13 @@ fn eq_heights(mode: OverlayMode, reduce_motion: bool, smooth_level: f64, elapsed
                 };
                 (base * (0.35 + 0.65 * level) * modulation).round()
             }
-            OverlayMode::Shown(OverlayKind::Connecting | OverlayKind::Finalizing) => {
+            OverlayMode::Shown(
+                OverlayKind::WarmingUp
+                | OverlayKind::Connecting
+                | OverlayKind::Finalizing
+                | OverlayKind::WaitingForResponse
+                | OverlayKind::StartingServer,
+            ) => {
                 if reduce_motion {
                     base
                 } else {
@@ -906,7 +980,9 @@ fn eq_heights(mode: OverlayMode, reduce_motion: bool, smooth_level: f64, elapsed
                 }
             }
             OverlayMode::Shown(OverlayKind::Committed) => (base * 0.35).round(),
-            OverlayMode::Shown(OverlayKind::Error | OverlayKind::LoginNeeded)
+            OverlayMode::Shown(
+                OverlayKind::Error | OverlayKind::Notice | OverlayKind::LoginNeeded,
+            )
             | OverlayMode::Hidden
             | OverlayMode::Splash => 0.0,
         })
@@ -918,7 +994,13 @@ fn eq_heights(mode: OverlayMode, reduce_motion: bool, smooth_level: f64, elapsed
 fn ring_values(mode: OverlayMode, elapsed: f64, delay: f64) -> (f64, f64) {
     let in_ring_state = matches!(
         mode,
-        OverlayMode::Shown(OverlayKind::Recognizing | OverlayKind::Connecting)
+        OverlayMode::Shown(
+            OverlayKind::Recognizing
+                | OverlayKind::WarmingUp
+                | OverlayKind::Connecting
+                | OverlayKind::WaitingForResponse
+                | OverlayKind::StartingServer
+        )
     );
     if !in_ring_state || elapsed < delay {
         return (ORB_SIZE, 0.0);
@@ -939,11 +1021,17 @@ fn text_style(style: Style, size: f32, weight: floem::text::Weight, color: Color
 
 fn orb_brush(mode: OverlayMode) -> Brush {
     match mode {
-        OverlayMode::Shown(OverlayKind::Connecting) => theme::color::BRAND_2.into(),
+        OverlayMode::Shown(
+            OverlayKind::WarmingUp | OverlayKind::Connecting | OverlayKind::StartingServer,
+        ) => theme::color::BRAND_2.into(),
         OverlayMode::Shown(OverlayKind::Error) => theme::color::ERROR.into(),
+        OverlayMode::Shown(OverlayKind::Notice) => theme::color::AMBER.into(),
         OverlayMode::Shown(OverlayKind::LoginNeeded) => theme::color::NAVY_SOFT.into(),
         OverlayMode::Shown(
-            OverlayKind::Recognizing | OverlayKind::Finalizing | OverlayKind::Committed,
+            OverlayKind::Recognizing
+            | OverlayKind::Finalizing
+            | OverlayKind::WaitingForResponse
+            | OverlayKind::Committed,
         ) => theme::grad_brand(),
         OverlayMode::Splash | OverlayMode::Hidden => theme::color::NAVY_SOFT.into(),
     }
@@ -954,10 +1042,13 @@ fn overlay_kind_color(mode: OverlayMode) -> Color {
         return theme::color::NAVY_SOFT;
     };
     match kind {
-        OverlayKind::Connecting => theme::color::AMBER,
+        OverlayKind::WarmingUp | OverlayKind::Connecting | OverlayKind::StartingServer => {
+            theme::color::AMBER
+        }
         OverlayKind::Recognizing => theme::color::BRAND,
-        OverlayKind::Finalizing => theme::color::CYAN,
+        OverlayKind::Finalizing | OverlayKind::WaitingForResponse => theme::color::CYAN,
         OverlayKind::Committed => theme::color::BRAND,
+        OverlayKind::Notice => theme::color::AMBER,
         OverlayKind::Error => theme::color::ERROR,
         OverlayKind::LoginNeeded => theme::color::NAVY_SOFT,
     }
@@ -987,9 +1078,12 @@ fn overlay_status_text(mode: OverlayMode, auto_paste: bool) -> &'static str {
         return "";
     };
     match kind {
+        OverlayKind::WarmingUp => WARMUP_TITLE,
         OverlayKind::Connecting => "つないでいます",
-        OverlayKind::Recognizing => "聞き取り中",
+        OverlayKind::Recognizing => "聞いています",
         OverlayKind::Finalizing => "文字にしています",
+        OverlayKind::WaitingForResponse => WAITING_FOR_RESPONSE_TITLE,
+        OverlayKind::StartingServer => STARTING_SERVER_TITLE,
         OverlayKind::Committed => {
             if auto_paste {
                 "貼り付けました"
@@ -997,6 +1091,7 @@ fn overlay_status_text(mode: OverlayMode, auto_paste: bool) -> &'static str {
                 "コピーしました"
             }
         }
+        OverlayKind::Notice => "お知らせ",
         OverlayKind::Error => "うまくいきませんでした",
         OverlayKind::LoginNeeded => "ログインが必要です",
     }
@@ -1007,10 +1102,14 @@ fn overlay_summary(mode: OverlayMode) -> &'static str {
         OverlayMode::Hidden => "hidden",
         OverlayMode::Splash => "splash",
         OverlayMode::Shown(kind) => match kind {
+            OverlayKind::WarmingUp => "warming-up",
             OverlayKind::Connecting => "connecting",
             OverlayKind::Recognizing => "recognizing",
             OverlayKind::Finalizing => "finalizing",
+            OverlayKind::WaitingForResponse => "waiting-for-response",
+            OverlayKind::StartingServer => "starting-server",
             OverlayKind::Committed => "committed",
+            OverlayKind::Notice => "notice",
             OverlayKind::Error => "error",
             OverlayKind::LoginNeeded => "login-needed",
         },
@@ -1126,7 +1225,36 @@ const CHIP_BACKGROUND_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" vi
 
 #[cfg(test)]
 mod tests {
-    use super::display_text;
+    use super::{
+        display_text, overlay_status_text, OverlayMode, STARTING_SERVER_SUBTITLE,
+        STARTING_SERVER_TITLE, WAITING_FOR_RESPONSE_TITLE, WARMUP_SUBTITLE, WARMUP_TITLE,
+    };
+    use crate::controller::OverlayKind;
+
+    #[test]
+    fn warming_overlay_uses_the_required_title_and_instruction() {
+        assert_eq!(WARMUP_TITLE, "起動中");
+        assert_eq!(WARMUP_SUBTITLE, "まだ話さないでください");
+        assert_eq!(
+            overlay_status_text(OverlayMode::Shown(OverlayKind::WarmingUp), true),
+            WARMUP_TITLE
+        );
+    }
+
+    #[test]
+    fn waiting_overlays_use_the_required_text() {
+        assert_eq!(WAITING_FOR_RESPONSE_TITLE, "認識中");
+        assert_eq!(STARTING_SERVER_TITLE, "サーバーを起動しています");
+        assert_eq!(STARTING_SERVER_SUBTITLE, "しばらくお待ちください");
+        assert_eq!(
+            overlay_status_text(OverlayMode::Shown(OverlayKind::WaitingForResponse), true),
+            WAITING_FOR_RESPONSE_TITLE
+        );
+        assert_eq!(
+            overlay_status_text(OverlayMode::Shown(OverlayKind::StartingServer), true),
+            STARTING_SERVER_TITLE
+        );
+    }
 
     #[test]
     fn display_text_keeps_exactly_fifty_two_characters() {

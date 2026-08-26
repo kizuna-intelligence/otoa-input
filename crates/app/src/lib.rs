@@ -9,11 +9,12 @@
 //! use std::sync::Arc;
 //! # fn main() -> anyhow::Result<()> {
 //! let provider = Arc::new(otoa_input_app::SelfHostedProvider);
-//! otoa_input_app::run(otoa_input_app::Deps { provider })
+//! otoa_input_app::run(otoa_input_app::Deps::new(provider))
 //! # }
 //! ```
 
-use crossbeam_channel::unbounded as unbounded_channel;
+use crossbeam_channel::{unbounded as unbounded_channel, Sender};
+use floem::window::WindowId;
 use otoa_input_core::ConnectionProvider;
 use otoa_input_platform::{PasteMethod, TextOutput};
 use std::{collections::HashMap, sync::Arc};
@@ -24,23 +25,78 @@ mod connection;
 mod controller;
 mod settings;
 mod settings_io;
-mod ui;
+pub mod ui;
 mod wiring;
 
 pub use connection::SelfHostedProvider;
+pub use controller::{ControllerCommand, LevelStatus, LoginState};
 pub use settings::Settings;
+
+/// 設定画面を差し替える。
+///
+/// 受け取るものは公開版の設定画面と同じで、返すのは画面そのものである。
+/// 公開版の [`ui::settings_view::view`] を自分で呼べるので、
+/// **公開版の画面を土台にして自分の欄を足す**形が取れる。
+/// 設定画面に足す、配布ごとの面。
+///
+/// 返すのは面の中身だけでよい。レール（左の項目）も枠も公開版が描くので、
+/// 見た目は自動で揃う。`label` はレールに出す名前。
+#[derive(Clone)]
+pub struct ExtraSettingsPage {
+    pub label: &'static str,
+    pub build: Arc<
+        dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>) -> floem::AnyView + Send + Sync,
+    >,
+    /// 保存ボタンが押されたときに呼ばれる。この面が持つ設定を書き込む。
+    ///
+    /// **保存ボタンは 1 つにする。** 面が自分の保存ボタンを持つと、
+    /// 公開版の保存が画面を開いた時点の設定から組み直すので、面が書いた
+    /// ぶんが消える（実際にそうなった）。面は「何を足すか」だけを言い、
+    /// 書き込むのは公開版の保存に一本化する。
+    pub apply: Arc<dyn Fn(&mut Settings) + Send + Sync>,
+}
+
+pub type SettingsView = Arc<
+    dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>, WindowId) -> floem::AnyView
+        + Send
+        + Sync,
+>;
+// 公開版の画面が受け取る初期ページは差し替え側に渡していない。
+// 差し替えた画面が自分の面構成を持つ以上、公開版のページ指定は意味を持たない。
 
 /// [`run`] に差し込むもの。
 ///
-/// **拡張点はここ 1 つだけにしてある。** 増やすたびに、公開側が永久に
-/// 維持しなければならない API が増える。接続先ごとの設定は
-/// [`Settings::product`] を通して各実装が自分で解釈する。
+/// **拡張点を増やすときは、それが永久に維持する API になることを承知で増やす。**
+/// 接続先ごとの設定は [`Settings::product`] を通して各実装が自分で解釈する。
 pub struct Deps {
     /// 接続先の解決、認証、アカウント表示を担う。
     ///
     /// [`ConnectionProvider::prepare`] が `None` を返す実装では、
     /// ログイン関係の UI（トレイの項目、設定画面のアカウント欄）は出ない。
     pub provider: Arc<dyn ConnectionProvider>,
+    /// 設定画面に足す面。`None` なら足さない。
+    ///
+    /// 画面ごと差し替える [`Deps::settings_view`] と違い、こちらは
+    /// 公開版の画面をそのまま使ったまま、面を 1 つ増やす。
+    /// ふつうはこちらで足りる。
+    pub extra_settings_page: Option<ExtraSettingsPage>,
+    /// 設定画面。`None` なら公開版のものを使う。
+    ///
+    /// 設定画面に欄を 1 つ足すためだけに個別の差し込み口を並べると、
+    /// 欄の種類ごとに口が増えていく。画面ごと渡せるようにして、
+    /// 足すものは各実装が自分で決める。
+    pub settings_view: Option<SettingsView>,
+}
+
+impl Deps {
+    /// 接続先だけを差し替える。設定画面は公開版のものを使う。
+    pub fn new(provider: Arc<dyn ConnectionProvider>) -> Self {
+        Self {
+            provider,
+            settings_view: None,
+            extra_settings_page: None,
+        }
+    }
 }
 
 /// 設定ファイルを読む。[`Deps`] を組み立てるために先に必要になる。
@@ -48,13 +104,21 @@ pub fn load_settings() -> anyhow::Result<Settings> {
     settings_io::load()
 }
 
+/// 設定を保存する。
+///
+/// 面を足す配布（[`Deps::extra_settings_page`]）が自分の保存を持つときに要る。
+/// **[`ControllerCommand::UpdateSettings`] を送るだけでは残らない。**
+/// あれは動いている本体へ知らせるだけで、ファイルには書かない。
+/// 送るだけにして、再起動のたびに設定が消えることがあった。
+pub fn save_settings(settings: &Settings) -> anyhow::Result<()> {
+    settings_io::save(settings)
+}
+
 /// 同梱の [`SelfHostedProvider`] で起動する。
 pub fn run_self_hosted() -> anyhow::Result<()> {
     // **設定を読む前に呼ぶ。** 他の配布と設定ファイルを共有しないため。
     otoa_input_platform::set_app_directory("otoa-input-oss");
-    run(Deps {
-        provider: Arc::new(SelfHostedProvider),
-    })
+    run(Deps::new(Arc::new(SelfHostedProvider)))
 }
 
 /// `--help` の本文。オプションを増やしたらここも足す。
@@ -75,7 +139,7 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
                       文字を入れたい場所にカーソルを置いてから実行する
   --preview-overlay=<状態>
                       音声・接続なしで入力バーを表示する。
-                      splash/connecting/listening/finalizing/committed/error/login
+                      splash/warming-up/connecting/listening/finalizing/committed/error/login
   --preview-settings[=<面>]
                       音声・接続なしで設定画面を表示する。
                       general/mic/asr/advanced/account/about
@@ -180,13 +244,19 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--preview-overlay は =状態 で指定してください"))?;
         let scenario = wiring::PreviewScenario::parse(value).ok_or_else(|| {
             anyhow::anyhow!(
-                "未知の preview 状態です: {value}（splash/connecting/listening/finalizing/committed/error/login）"
+                "未知の preview 状態です: {value}（splash/warming-up/connecting/listening/finalizing/committed/error/login）"
             )
         })?;
         let settings = load_settings()?;
         let (to_ui, ui_updates) = unbounded_channel();
         let runtime = wiring::start_preview(settings.clone(), scenario, to_ui)?;
-        return ui::run(settings, ui_updates, runtime);
+        return ui::run(
+            settings,
+            ui_updates,
+            runtime,
+            deps.settings_view,
+            deps.extra_settings_page,
+        );
     }
 
     if let Some(argument) = arguments
@@ -208,7 +278,13 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             wiring::PreviewScenario::Settings(page),
             to_ui,
         )?;
-        return ui::run(settings, ui_updates, runtime);
+        return ui::run(
+            settings,
+            ui_updates,
+            runtime,
+            deps.settings_view,
+            deps.extra_settings_page,
+        );
     }
 
     if let Some(index) = arguments
@@ -246,7 +322,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
     // 接続先が自分の機械で、まだ誰も待ち受けていなければ、同梱の ASR サーバーを
     // 自分で立てる。**利用者に 2 つ起動させないため。**
     // 接続確認より前に行う。ここを後にすると --check-connection が必ず失敗する。
-    let bundled_server_failure = if let Ok(endpoint) = deps.provider.endpoint(&settings.core) {
+    let bundled_server_failure = if let Ok(endpoint) = deps.provider.endpoint_hint(&settings.core) {
         match bundled_server::start_if_needed(&endpoint.url, &settings.asr_engine) {
             Ok(Some(model_dir)) => {
                 tracing::info!(model_dir = %model_dir.display(), "同梱の ASR サーバーを起動した");
@@ -291,7 +367,13 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         to_ui,
         account_settings_available,
     )?;
-    ui::run(settings, ui_updates, runtime)
+    ui::run(
+        settings,
+        ui_updates,
+        runtime,
+        deps.settings_view,
+        deps.extra_settings_page,
+    )
 }
 
 #[cfg(test)]

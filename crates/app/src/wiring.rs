@@ -13,6 +13,7 @@ use std::thread;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreviewScenario {
     Splash,
+    WarmingUp,
     Connecting,
     Listening,
     Finalizing,
@@ -23,22 +24,48 @@ pub enum PreviewScenario {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SettingsPage {
+pub enum SettingsPage {
     General,
     Microphone,
     Recognition,
-    Advanced,
+    /// 見た目の設定。以前は「詳細」という箱に、接続の設定と透過表示が
+    /// 混ざっていた。分類が噛み合っておらず「一般」が 7 行に膨らんで
+    /// スクロールしていたので、見た目はここへ集めた。
+    Display,
+    /// 配布ごとの面。中身は [`crate::Deps::extra_settings_page`] が出す。
+    ///
+    /// 面を 1 つ渡せる形にしたのは、別ウィンドウにすると
+    /// 「設定を閉じたつもりでアプリが終わる」ことになり、
+    /// 欄ごとに差し込み口を作ると欄の種類だけ口が増えるからである。
+    /// レールも枠も公開版が描くので、見た目は勝手に揃う。
+    Extra,
     Account,
     About,
 }
 
 impl SettingsPage {
+    /// 覚えておくときの名前。面ごとに必要な窓の大きさを持つのに使う。
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Microphone => "mic",
+            Self::Recognition => "asr",
+            Self::Display => "display",
+            Self::Extra => "extra",
+            Self::Account => "account",
+            Self::About => "about",
+        }
+    }
+
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
+            "extra" => Some(Self::Extra),
             "general" => Some(Self::General),
             "mic" => Some(Self::Microphone),
             "asr" => Some(Self::Recognition),
-            "advanced" => Some(Self::Advanced),
+            "display" => Some(Self::Display),
+            // 旧名。「詳細」は無くなり、中身は「一般」と「表示」へ分かれた。
+            "advanced" => Some(Self::Display),
             "account" => Some(Self::Account),
             "about" => Some(Self::About),
             _ => None,
@@ -50,6 +77,7 @@ impl PreviewScenario {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "splash" => Some(Self::Splash),
+            "warming-up" => Some(Self::WarmingUp),
             "connecting" => Some(Self::Connecting),
             "listening" => Some(Self::Listening),
             "finalizing" => Some(Self::Finalizing),
@@ -196,6 +224,7 @@ fn send_preview_update(to_ui: &Sender<UiUpdate>, scenario: PreviewScenario, elap
     let view = match scenario {
         PreviewScenario::Splash => OverlayView::Splash,
         PreviewScenario::Settings(_) => OverlayView::Hidden,
+        PreviewScenario::WarmingUp => preview_overlay(OverlayKind::WarmingUp, "", "", ""),
         PreviewScenario::Connecting => preview_overlay(OverlayKind::Connecting, "", "", ""),
         PreviewScenario::Listening => preview_overlay(
             OverlayKind::Recognizing,
