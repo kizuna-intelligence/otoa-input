@@ -142,8 +142,10 @@ grep -q "source=Notarized Developer ID" "$SECRETS/spctl.txt" \
     || { echo "公証が反映されていない" >&2; exit 1; }
 
 mkdir -p "$ROOT/dist"
-cp "$DMG" "$ROOT/dist/otoa-input-$VERSION-macos-arm64.dmg"
-( cd "$ROOT/dist" && shasum -a 256 "otoa-input-$VERSION-macos-arm64.dmg" \
-    > "otoa-input-$VERSION-macos-arm64.dmg.sha256" )
+# 名前にバージョンを入れない（build-release.sh と同じ理由）。
+# .app の CFBundleShortVersionString には入っているので、版は失われない。
+cp "$DMG" "$ROOT/dist/otoa-input-macos-arm64.dmg"
+( cd "$ROOT/dist" && shasum -a 256 "otoa-input-macos-arm64.dmg" \
+    > "otoa-input-macos-arm64.dmg.sha256" )
 echo
-echo "できた: $ROOT/dist/otoa-input-$VERSION-macos-arm64.dmg"
+echo "できた: $ROOT/dist/otoa-input-macos-arm64.dmg"

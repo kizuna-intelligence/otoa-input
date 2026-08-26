@@ -69,7 +69,8 @@ chmod +x "$APPDIR/AppRun"
 
 echo "==> AppImage"
 mkdir -p "$ROOT/dist"
-OUT="$ROOT/dist/otoa-input-$VERSION-linux-x86_64.AppImage"
+# 名前にバージョンを入れない（build-release.sh と同じ理由）。
+OUT="$ROOT/dist/otoa-input-linux-x86_64.AppImage"
 rm -f "$OUT"
 ARCH=x86_64 "$TOOL" "$APPDIR" "$OUT" 2>&1 | tail -3
 

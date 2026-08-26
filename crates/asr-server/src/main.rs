@@ -17,5 +17,10 @@ async fn main() -> anyhow::Result<()> {
         print!("{}", otoa_asr_server::USAGE);
         return Ok(());
     }
+    // 配布物の名前に版を入れていないので、手元のものがどれかはここで見る。
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("otoa-asr-server {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     otoa_asr_server::run(otoa_asr_server::Config::from_process_args()?).await
 }

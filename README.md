@@ -35,9 +35,12 @@
 
 | OS | ファイル |
 |---|---|
-| Linux | `otoa-input-<版>-linux-x86_64.AppImage` |
-| macOS (Apple Silicon) | `otoa-input-<版>-macos-arm64.dmg` |
-| Windows | `otoa-input-<版>-windows-x86_64.zip` |
+| Linux | [`otoa-input-linux-x86_64.AppImage`](https://github.com/kizuna-intelligence/otoa-input/releases/latest/download/otoa-input-linux-x86_64.AppImage) |
+| macOS (Apple Silicon) | [`otoa-input-macos-arm64.dmg`](https://github.com/kizuna-intelligence/otoa-input/releases/latest/download/otoa-input-macos-arm64.dmg) |
+| Windows | [`otoa-input-windows-x86_64.zip`](https://github.com/kizuna-intelligence/otoa-input/releases/latest/download/otoa-input-windows-x86_64.zip) |
+
+上の表のリンクは常に最新版を指します（名前に版番号を入れていないため）。
+今動いているものの版は `--version` で確かめられます。
 
 - **Linux**: 実行できるようにします。`chmod +x otoa-input-*.AppImage`
 - **macOS**: `.dmg` を開いて `Otoa Input.app` を「アプリケーション」へドラッグ。
@@ -103,7 +106,7 @@ kodama に必要なのは `onnx/` にある5ファイルと `tokenizer.json` で
 例（Linux で本体の隣に置く場合）:
 
 ```
-otoa-input-0.1.3-linux-x86_64.AppImage
+otoa-input-linux-x86_64.AppImage
 models/
   reazonspeech-k2-v2/
     encoder-epoch-99-avg-1.onnx

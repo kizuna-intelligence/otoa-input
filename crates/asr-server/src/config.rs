@@ -219,6 +219,7 @@ otoa-asr-server — Otoa ASR Protocol v1 のサーバー
   --auth-token=<token>        Authorization: Bearer に要求するトークン
   --dump-dir=<dir>            認識へ渡した音声を WAV で書き出す (調査用)
   -h, --help                  この使い方を表示する
+  -V, --version               版を表示する
 
 すべてのオプションは環境変数でも指定できる。--asr-model-dir なら
 OTOA_ASR_ASR_MODEL_DIR。指定の優先順位はコマンド引数、環境変数、既定値。
