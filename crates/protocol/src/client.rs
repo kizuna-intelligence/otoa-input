@@ -33,6 +33,8 @@ pub enum AsrEvent {
     FinalizeDone,
     /// `finished: true` を受信した。この後 close される。
     Finished,
+    /// セッションを継続したまま利用者へ伝える通知。
+    Notice { code: String, message: String },
     /// 復帰不能な失敗。この後スレッドは終了する。
     Failed(AsrError),
 }
@@ -47,11 +49,11 @@ impl AsrSession {
         headers: Vec<(String, String)>,
         commands: Receiver<AsrCommand>,
         events: crossbeam_channel::Sender<AsrEvent>,
-    ) -> thread::JoinHandle<()> {
+    ) -> Result<thread::JoinHandle<()>, AsrError> {
         thread::Builder::new()
             .name("otoa-asr".to_string())
             .spawn(move || run_session(&url, config, headers, commands, events))
-            .expect("failed to spawn ASR session thread")
+            .map_err(|error| AsrError::Io(format!("failed to spawn ASR session thread: {error}")))
     }
 }
 
@@ -148,14 +150,19 @@ fn run_session(
                 match parse_response(&text) {
                     Ok(response_events) => {
                         for event in response_events {
-                            if matches!(event, AsrEvent::Finished) {
-                                finished_received = true;
-                            }
-                            if matches!(event, AsrEvent::Failed(_)) {
-                                failed = true;
-                            }
-                            if let AsrEvent::Failed(AsrError::Server { request_id, .. }) = &event {
-                                tracing::error!(?request_id, "ASR server error");
+                            match &event {
+                                AsrEvent::Finished => finished_received = true,
+                                AsrEvent::Notice { code, .. } => {
+                                    // Notice は利用者向けの非致命イベントである。failed
+                                    // にせず、この WebSocket をそのまま受信し続ける。
+                                    tracing::debug!(notice_code = %code, "ASR notice received");
+                                }
+                                AsrEvent::Failed(AsrError::Server { request_id, .. }) => {
+                                    failed = true;
+                                    tracing::error!(?request_id, "ASR server error");
+                                }
+                                AsrEvent::Failed(_) => failed = true,
+                                _ => {}
                             }
                             let is_failed = matches!(event, AsrEvent::Failed(_));
                             let _ = events.send(event);
@@ -284,5 +291,112 @@ fn set_read_timeout(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>) {
     };
     if let Err(error) = result {
         tracing::warn!("failed to set ASR read timeout: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AsrCommand, AsrSession};
+    use crate::{AsrConfig, AsrEvent};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+    use tungstenite::{accept, Message};
+
+    #[test]
+    fn notice_does_not_end_the_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should have an address");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client should connect");
+            let mut websocket = accept(stream).expect("websocket handshake should succeed");
+            assert!(matches!(
+                websocket.read().expect("config should arrive"),
+                Message::Text(_)
+            ));
+            websocket
+                .send(Message::Text(
+                    r#"{"notice_code":"gate_blocked","notice_message":"登録した声と一致しませんでした。"}"#.to_string(),
+                ))
+                .expect("notice should be sent");
+            websocket
+                .send(Message::Text(
+                    r#"{"tokens":[{"text":"次の応答","is_final":false}]}"#.to_string(),
+                ))
+                .expect("post-notice response should be sent");
+
+            loop {
+                match websocket
+                    .read()
+                    .expect("client should keep the session open")
+                {
+                    Message::Text(text) if text.is_empty() => {
+                        websocket
+                            .send(Message::Text(r#"{"finished":true}"#.to_string()))
+                            .expect("finished response should be sent");
+                        return;
+                    }
+                    Message::Close(_) => return,
+                    _ => {}
+                }
+            }
+        });
+
+        let (to_session, commands) = crossbeam_channel::unbounded();
+        let (events, event_receiver) = crossbeam_channel::unbounded();
+        let client = AsrSession::spawn(
+            format!("ws://{address}/asr/v1"),
+            AsrConfig::realtime_pcm16k(None),
+            Vec::new(),
+            commands,
+            events,
+        )
+        .expect("ASR session thread should start");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_notice = false;
+        let mut saw_post_notice_response = false;
+        while Instant::now() < deadline && !saw_post_notice_response {
+            match event_receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("event should arrive")
+            {
+                AsrEvent::Notice { code, message } => {
+                    assert_eq!(code, "gate_blocked");
+                    assert_eq!(message, "登録した声と一致しませんでした。");
+                    saw_notice = true;
+                }
+                AsrEvent::PartialText(tokens) if !tokens.is_empty() => {
+                    assert_eq!(tokens[0].text, "次の応答");
+                    saw_post_notice_response = true;
+                }
+                AsrEvent::Failed(error) => panic!("notice ended the session: {error}"),
+                _ => {}
+            }
+        }
+        assert!(saw_notice, "notice was not delivered");
+        assert!(
+            saw_post_notice_response,
+            "session did not continue after notice"
+        );
+
+        to_session
+            .send(AsrCommand::Stop)
+            .expect("stop should be sent");
+        let mut saw_finished = false;
+        while Instant::now() < deadline && !saw_finished {
+            match event_receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("finished event should arrive")
+            {
+                AsrEvent::Finished => saw_finished = true,
+                AsrEvent::Failed(error) => panic!("session failed after notice: {error}"),
+                _ => {}
+            }
+        }
+        assert!(saw_finished, "session did not finish normally");
+        client.join().expect("client thread should stop");
+        server.join().expect("test server should stop");
     }
 }

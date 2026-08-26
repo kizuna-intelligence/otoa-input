@@ -1189,8 +1189,7 @@ checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 [[package]]
 name = "floem"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "015c4ae49e377fa0b8a7ba737541c8868ff9b7683f1a7a97a4e48296a5b3bd35"
+source = "git+https://github.com/kizuna-intelligence/floem?branch=feat%2Fset-window-size#61c7c652e0705ba67337c10873d45d4acd5aa53a"
 dependencies = [
  "bitflags 2.13.1",
  "clipboard-win 3.1.1",
@@ -1229,8 +1228,7 @@ dependencies = [
 [[package]]
 name = "floem-editor-core"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e3e40a1b06cb878f44a172f51d506d56bae76e7b2b977ba7a40a9217b6c33e3"
+source = "git+https://github.com/kizuna-intelligence/floem?branch=feat%2Fset-window-size#61c7c652e0705ba67337c10873d45d4acd5aa53a"
 dependencies = [
  "bitflags 2.13.1",
  "itertools 0.12.1",
@@ -1305,8 +1303,7 @@ dependencies = [
 [[package]]
 name = "floem_reactive"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6b9dd30efe54c413d07e3af6b410afb4b098ff70e79cfd0d13b6f3f2246448a"
+source = "git+https://github.com/kizuna-intelligence/floem?branch=feat%2Fset-window-size#61c7c652e0705ba67337c10873d45d4acd5aa53a"
 dependencies = [
  "smallvec",
 ]
@@ -1314,8 +1311,7 @@ dependencies = [
 [[package]]
 name = "floem_renderer"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5557d9d94ee5c7f65c6d84f416591b92ae50fa1e173dea021cfc2399edc3235"
+source = "git+https://github.com/kizuna-intelligence/floem?branch=feat%2Fset-window-size#61c7c652e0705ba67337c10873d45d4acd5aa53a"
 dependencies = [
  "cosmic-text",
  "crossbeam",
@@ -1333,8 +1329,7 @@ dependencies = [
 [[package]]
 name = "floem_tiny_skia_renderer"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbef7961a882e1a88f0d2ad3c9842e2cf241e9b75d81abc720a2afedf661a9ef"
+source = "git+https://github.com/kizuna-intelligence/floem?branch=feat%2Fset-window-size#61c7c652e0705ba67337c10873d45d4acd5aa53a"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1351,8 +1346,7 @@ dependencies = [
 [[package]]
 name = "floem_vger_renderer"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8739e60f0824e2f4712737c2d9d9c814f3200d53abee7ea7e29f2703e922eb0"
+source = "git+https://github.com/kizuna-intelligence/floem?branch=feat%2Fset-window-size#61c7c652e0705ba67337c10873d45d4acd5aa53a"
 dependencies = [
  "anyhow",
  "floem-vger",

@@ -20,6 +20,11 @@ pub struct AsrResponse {
     pub error_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_message: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -76,6 +81,17 @@ pub(crate) fn parse_response(text: &str) -> Result<Vec<AsrEvent>, AsrError> {
             message: response.error_message.unwrap_or_default(),
             request_id: response.request_id,
         })]);
+    }
+
+    if let (Some(code), Some(message)) = (
+        response.notice_code.as_ref(),
+        response.notice_message.as_ref(),
+    ) {
+        // notice は tokens と混ぜず、セッションを続けたまま利用者へ渡す。
+        return Ok(vec![AsrEvent::Notice {
+            code: code.clone(),
+            message: message.clone(),
+        }]);
     }
 
     let mut final_tokens = Vec::new();
@@ -209,6 +225,21 @@ mod tests {
                 assert_eq!(request_id.as_deref(), Some("req-1"));
             }
             other => panic!("unexpected events: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notice_frame_maps_to_nonfatal_notice_only() {
+        let events = parse_response(
+            r#"{"notice_code":"gate_blocked","notice_message":"登録した声と一致しませんでした。"}"#,
+        )
+        .expect("notice should parse");
+        match events.as_slice() {
+            [AsrEvent::Notice { code, message }] => {
+                assert_eq!(code, "gate_blocked");
+                assert_eq!(message, "登録した声と一致しませんでした。");
+            }
+            other => panic!("unexpected notice events: {other:?}"),
         }
     }
 

@@ -126,7 +126,7 @@ impl SileroVad {
         anyhow::ensure!(chunk.len() == VAD_HOP, "invalid VAD chunk length");
         let mut input = Vec::with_capacity(VAD_CONTEXT + VAD_HOP);
         input.extend_from_slice(&self.context);
-        input.extend(chunk.iter().map(|sample| *sample as f32 / i16::MAX as f32));
+        input.extend(chunk.iter().copied().map(pcm_i16_to_unit));
         let next_context = input[input.len() - VAD_CONTEXT..].to_vec();
 
         let input_tensor = Tensor::<f32>::from_array(([1usize, VAD_CONTEXT + VAD_HOP], input))?;
@@ -160,9 +160,15 @@ impl SileroVad {
     }
 }
 
+/// s16 PCM を VAD が期待する [-1.0, 1.0) の単位値に写す。
+/// `i16::MAX` で割ると `i16::MIN` だけが -1.0 を下回る。
+fn pcm_i16_to_unit(sample: i16) -> f32 {
+    sample as f32 / 32_768.0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SileroVad, VAD_CONTEXT, VAD_FRAME_MS, VAD_HOP, VAD_SAMPLE_RATE};
+    use super::{pcm_i16_to_unit, SileroVad, VAD_CONTEXT, VAD_FRAME_MS, VAD_HOP, VAD_SAMPLE_RATE};
     use std::path::PathBuf;
 
     fn model_path() -> PathBuf {
@@ -184,6 +190,13 @@ mod tests {
         assert_eq!(VAD_HOP, 512);
         assert_eq!(VAD_CONTEXT, 64);
         assert_eq!(VAD_FRAME_MS, 32);
+    }
+
+    #[test]
+    fn pcm_normalization_keeps_i16_extremes_in_the_unit_interval() {
+        assert_eq!(pcm_i16_to_unit(i16::MIN), -1.0);
+        assert!(pcm_i16_to_unit(i16::MAX) < 1.0);
+        assert!(pcm_i16_to_unit(i16::MAX) > 0.999);
     }
 
     #[test]

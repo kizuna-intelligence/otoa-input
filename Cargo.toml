@@ -32,3 +32,10 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "alternative-backend"] }
 ndarray = "0.16"
+
+# 窓を中身に合わせて伸縮させるために floem を fork している。
+# 0.2.0 には窓を後から拡縮する手段が無く、作るときの大きさが全てだった。
+# 上流の最新には入っているが、0.2.0 からの差が大きく(45 箇所が壊れる)、
+# 見た目の回帰を伴う移行になるため、0.2.0 に set_window_size だけを足した。
+[patch.crates-io]
+floem = { git = "https://github.com/kizuna-intelligence/floem", branch = "feat/set-window-size" }

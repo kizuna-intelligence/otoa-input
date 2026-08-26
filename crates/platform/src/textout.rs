@@ -20,6 +20,15 @@ const MIN_EMIT_INTERVAL_MS: u64 = 150;
 #[cfg(target_os = "linux")]
 const XCLIP_MAX_RETRIES: usize = 3;
 
+/// `xdotool` は連結した各キーボードコマンドごとに `--delay` を解釈する。
+/// 最初の修飾キー解除を含め、すべてに 0 ms を明示しないと既定の 12 ms 遅延が
+/// 残る。解除・押下・解放の順序自体は変えない。
+#[cfg(target_os = "linux")]
+const XDOTOOL_PASTE_ARGS: &[&str] = &[
+    "--delay", "0", "ctrl", "shift", "alt", "super", "keydown", "--delay", "0", "ctrl", "keydown",
+    "--delay", "0", "v", "keyup", "--delay", "0", "v", "keyup", "--delay", "0", "ctrl",
+];
+
 #[derive(Debug)]
 pub enum PasteMethod {
     /// クリップボードに置くだけ。ユーザーが自分で貼る。
@@ -158,6 +167,14 @@ impl TextOutput {
             return;
         };
 
+        self.update_paste_target(window, window_pid);
+    }
+
+    /// 最新の非自分ウィンドウを、貼り付け先として覚える。
+    /// `send_paste_to_target` からも使い、送信直前に同じ X11 照会を二度
+    /// 実行しないようにする。`paste target updated` の追跡はここに残す。
+    #[cfg(target_os = "linux")]
+    fn update_paste_target(&mut self, window: u64, window_pid: u32) {
         if window_pid == self.pid {
             return;
         }
@@ -288,8 +305,6 @@ impl TextOutput {
 
     #[cfg(target_os = "linux")]
     fn send_paste_to_target(&mut self) -> Result<()> {
-        self.refresh_paste_target();
-
         let active_window = match get_active_window() {
             Ok(window) => window,
             Err(error) => {
@@ -309,6 +324,12 @@ impl TextOutput {
                 return Ok(());
             }
         };
+
+        // poll_paste_target がやっているのと同じ更新である。以前は
+        // refresh_paste_target で 1 回やった直後に、貼り付けのたびここでも
+        // 繰り返していた。貼り付けの経路にプロセス起動 2 つと X の往復が
+        // 余分に乗っていた。
+        self.update_paste_target(active_window, active_pid);
 
         debug!(
             "paste active window={} pid={} own_pid={} target={:?}",
@@ -582,13 +603,14 @@ fn run_xdotool_key_step(step: &str, action: &str, keys: &[&str]) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn send_paste_shortcut() -> Result<()> {
     let mut ctrl_keyup_guard = CtrlKeyupGuard::new();
+    // 最初に Ctrl/Shift/Alt/Super を明示的に離す処理は残すこと。これは
+    // CtrlKeyupGuard と対になっており、後のショートカット整理でも意図して
+    // 残されている。ここで変えるのはキー間の待ち時間だけで、修飾キーの
+    // 後始末には手を付けない。
     let result = run_xdotool_key_step(
         "keyup ctrl shift alt super keydown ctrl keydown v keyup v keyup ctrl",
         "keyup",
-        &[
-            "ctrl", "shift", "alt", "super", "keydown", "ctrl", "keydown", "v", "keyup", "v",
-            "keyup", "ctrl",
-        ],
+        XDOTOOL_PASTE_ARGS,
     );
     if result.is_ok() {
         ctrl_keyup_guard.disarm();
@@ -618,12 +640,28 @@ fn send_paste_shortcut() -> Result<()> {
 mod tests {
     use super::MIN_EMIT_INTERVAL_MS;
 
+    #[cfg(target_os = "linux")]
+    use super::XDOTOOL_PASTE_ARGS;
+
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::TextOutput;
 
     #[test]
     fn min_interval_is_150ms() {
         assert_eq!(MIN_EMIT_INTERVAL_MS, 150);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdotool_paste_sequence_keeps_modifier_cleanup_without_delay() {
+        assert_eq!(
+            XDOTOOL_PASTE_ARGS,
+            &[
+                "--delay", "0", "ctrl", "shift", "alt", "super", "keydown", "--delay", "0", "ctrl",
+                "keydown", "--delay", "0", "v", "keyup", "--delay", "0", "v", "keyup", "--delay",
+                "0", "ctrl",
+            ]
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

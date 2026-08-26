@@ -1,7 +1,7 @@
 use crate::settings::Settings;
 use otoa_input_core::Readiness;
 use otoa_input_platform::FRAME_SAMPLES;
-use otoa_input_protocol::{AsrCommand, AsrConfig, AsrError, AsrEvent, AsrSession, EndpointTuning};
+use otoa_input_protocol::{AsrCommand, AsrConfig, AsrError, AsrEvent, AsrSession};
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,17 +30,19 @@ pub fn run(settings: &Settings, provider: Arc<dyn otoa_input_core::ConnectionPro
         .is_empty()
         .then(|| endpoint.api_key.clone())
         .flatten();
-    let mut config = AsrConfig::realtime_pcm16k(config_key).with_endpoint_tuning(EndpointTuning {
-        max_delay_ms: settings.endpoint_max_delay_ms,
-        sensitivity: settings.endpoint_sensitivity,
-        latency_level: settings.endpoint_latency_level,
-    });
+    let mut config = AsrConfig::realtime_pcm16k(config_key);
     config.language_hints = settings.language_hints.clone();
 
     let (to_session, commands) = crossbeam_channel::unbounded();
     let (events, event_receiver) = crossbeam_channel::unbounded();
     let session_thread =
-        AsrSession::spawn(endpoint.url, config, endpoint.headers, commands, events);
+        match AsrSession::spawn(endpoint.url, config, endpoint.headers, commands, events) {
+            Ok(session_thread) => session_thread,
+            Err(error) => {
+                println!("NG: connect failed: {error}");
+                return 4;
+            }
+        };
 
     let result = wait_for_finished(
         to_session,
@@ -187,6 +189,7 @@ enum EventKind {
     SpeechEndpoint,
     FinalizeDone,
     Finished,
+    Notice,
     Failed,
 }
 
@@ -199,13 +202,14 @@ impl EventKind {
             Self::SpeechEndpoint => "SpeechEndpoint",
             Self::FinalizeDone => "FinalizeDone",
             Self::Finished => "Finished",
+            Self::Notice => "Notice",
             Self::Failed => "Failed",
         }
     }
 }
 
 #[derive(Default)]
-struct EventCounts([usize; 7]);
+struct EventCounts([usize; 8]);
 
 impl EventCounts {
     fn record(&mut self, event: &AsrEvent) -> EventKind {
@@ -216,6 +220,7 @@ impl EventCounts {
             AsrEvent::Endpoint => EventKind::SpeechEndpoint,
             AsrEvent::FinalizeDone => EventKind::FinalizeDone,
             AsrEvent::Finished => EventKind::Finished,
+            AsrEvent::Notice { .. } => EventKind::Notice,
             AsrEvent::Failed(_) => EventKind::Failed,
         };
         self.0[kind as usize] += 1;
@@ -233,6 +238,7 @@ impl fmt::Display for EventCounts {
             EventKind::SpeechEndpoint,
             EventKind::FinalizeDone,
             EventKind::Finished,
+            EventKind::Notice,
             EventKind::Failed,
         ]
         .into_iter()

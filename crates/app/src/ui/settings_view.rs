@@ -65,9 +65,6 @@ struct FormState {
     vad_min_silence_ms: RwSignal<String>,
     vad_min_speech_ms: RwSignal<String>,
     preroll_ms: RwSignal<String>,
-    endpoint_max_delay_ms: RwSignal<String>,
-    endpoint_sensitivity: RwSignal<String>,
-    endpoint_latency_level: RwSignal<String>,
     idle_close_sec: RwSignal<String>,
     commit_hold_ms: RwSignal<Pct>,
     splash_ms: RwSignal<String>,
@@ -75,6 +72,15 @@ struct FormState {
     overlay_transparent: RwSignal<String>,
     reduce_motion: RwSignal<bool>,
 }
+
+/// 窓の幅。横は中身の量で変わらないので固定でよい。
+const WINDOW_WIDTH: f64 = 900.0;
+/// 画面から溢れないための歯止め。中身がどれだけ増えてもここで止める。
+const MIN_WINDOW_HEIGHT: f64 = 480.0;
+const MAX_WINDOW_HEIGHT: f64 = 1200.0;
+/// 上下の帯の高さ。下の `.height(...)` と同じ値を使う。
+const TOP_BAR_HEIGHT: f64 = 56.0;
+const BOTTOM_BAR_HEIGHT: f64 = 64.0;
 
 pub fn view(
     settings: Settings,
@@ -102,9 +108,6 @@ pub fn view(
     let vad_min_silence_ms = RwSignal::new(settings.vad_min_silence_ms.to_string());
     let vad_min_speech_ms = RwSignal::new(settings.vad_min_speech_ms.to_string());
     let preroll_ms = RwSignal::new(settings.preroll_ms.to_string());
-    let endpoint_max_delay_ms = RwSignal::new(settings.endpoint_max_delay_ms.to_string());
-    let endpoint_sensitivity = RwSignal::new(settings.endpoint_sensitivity.to_string());
-    let endpoint_latency_level = RwSignal::new(settings.endpoint_latency_level.to_string());
     let idle_close_sec = RwSignal::new(settings.idle_close_sec.to_string());
     let commit_hold_ms = RwSignal::new(commit_hold_to_pct(settings.commit_hold_ms));
     let splash_ms = RwSignal::new(settings.splash_ms.to_string());
@@ -139,9 +142,6 @@ pub fn view(
         vad_min_silence_ms,
         vad_min_speech_ms,
         preroll_ms,
-        endpoint_max_delay_ms,
-        endpoint_sensitivity,
-        endpoint_latency_level,
         idle_close_sec,
         commit_hold_ms,
         splash_ms,
@@ -190,6 +190,7 @@ pub fn view(
     let save_message =
         RwSignal::new("保存すると反映されます。認識エンジンは再起動後。".to_string());
     let save_message_error = RwSignal::new(false);
+    let extra_for_save = extra.clone();
     let save = {
         let commands = commands.clone();
         let original = settings.clone();
@@ -212,18 +213,6 @@ pub fn view(
                 original.vad_min_speech_ms,
             );
             next.preroll_ms = parse_or(&form.preroll_ms.get_untracked(), original.preroll_ms);
-            next.endpoint_max_delay_ms = parse_or(
-                &form.endpoint_max_delay_ms.get_untracked(),
-                original.endpoint_max_delay_ms,
-            );
-            next.endpoint_sensitivity = parse_or(
-                &form.endpoint_sensitivity.get_untracked(),
-                original.endpoint_sensitivity,
-            );
-            next.endpoint_latency_level = parse_or(
-                &form.endpoint_latency_level.get_untracked(),
-                original.endpoint_latency_level,
-            );
             next.idle_close_sec = parse_or(
                 &form.idle_close_sec.get_untracked(),
                 original.idle_close_sec,
@@ -236,6 +225,12 @@ pub fn view(
                 overlay_transparent_value(&form.overlay_transparent.get_untracked()).to_string();
             next.reduce_motion = form.reduce_motion.get_untracked();
             next.microphone = form.selected_microphone.get_untracked().id;
+
+            // 面が持つ設定を混ぜる。保存ボタンは 1 つなので、ここで拾わないと
+            // 面の選択が保存されない。
+            if let Some(page) = extra_for_save.as_ref() {
+                (page.apply)(&mut next);
+            }
 
             if let Err(error) = crate::settings_io::save(&next) {
                 tracing::error!("設定の保存に失敗しました: {error:#}");
@@ -266,35 +261,58 @@ pub fn view(
             )
         },
     );
-    let right = scroll(v_stack((pages,)).style(|style| style.width_full().items_center()))
-        .scroll_style(|style| {
-            style
-                .handle_background(theme::color::LINE)
-                .handle_border_radius(100.0.pct())
-                .handle_rounded(true)
-                .handle_thickness(6.0)
-                .track_background(floem::peniko::Color::TRANSPARENT)
-                .track_border(0.0)
-                .track_thickness(6.0)
-        })
-        .style(|style| {
-            style
-                .width_full()
-                .height_full()
-                .flex_grow(1.0)
-                .min_height(0.0)
-                .padding(theme::space::XL)
-                .background(theme::color::BG)
-                .class(floem::views::scroll::Handle, |style| {
-                    style
-                        .background(theme::color::LINE)
-                        .border_radius(100.0.pct())
-                        .hover(|style| style.background(theme::color::NAVY_SOFT))
-                })
-                .class(floem::views::scroll::Track, |style| {
-                    style.background(floem::peniko::Color::TRANSPARENT)
-                })
-        });
+    // 窓を中身に合わせる。数値を書かないので、行や面が増えても、フォントや
+    // 画面の倍率が違っても、そのまま合う。
+    //
+    // **大きくはするが、小さくはしない。** 面を切り替えるたびに縮めると、
+    // 「アカウント」(1 行)へ行った瞬間に窓が縮み、「認識」へ戻ると
+    // また広がる、と行き来のたびに跳ねる。一番大きい面に合わせたいので、
+    // 見た中で一番高いものを覚えて、そこまでしか縮めない。
+    //
+    // 全部の面を先に測れば最初から一番大きい面に合わせられるが、それには
+    // 開いてもいない面を描くことになり、マイクの面は入力レベルの計測を
+    // 始めるなど副作用がある。見た面だけで判断する。
+    let tallest_seen = RwSignal::new(0.0_f64);
+    let right = scroll(
+        v_stack((pages,))
+            .style(|style| style.width_full().items_center())
+            .on_resize(move |rect| {
+                let height = rect.height();
+                if height <= tallest_seen.get_untracked() {
+                    return;
+                }
+                tallest_seen.set(height);
+                fit_window_to_content(height);
+            }),
+    )
+    .scroll_style(|style| {
+        style
+            .handle_background(theme::color::LINE)
+            .handle_border_radius(100.0.pct())
+            .handle_rounded(true)
+            .handle_thickness(6.0)
+            .track_background(floem::peniko::Color::TRANSPARENT)
+            .track_border(0.0)
+            .track_thickness(6.0)
+    })
+    .style(|style| {
+        style
+            .width_full()
+            .height_full()
+            .flex_grow(1.0)
+            .min_height(0.0)
+            .padding(theme::space::XL)
+            .background(theme::color::BG)
+            .class(floem::views::scroll::Handle, |style| {
+                style
+                    .background(theme::color::LINE)
+                    .border_radius(100.0.pct())
+                    .hover(|style| style.background(theme::color::NAVY_SOFT))
+            })
+            .class(floem::views::scroll::Track, |style| {
+                style.background(floem::peniko::Color::TRANSPARENT)
+            })
+    });
 
     let header = h_stack((
         app_mark(28.0),
@@ -366,8 +384,20 @@ pub fn view(
     .on_cleanup(move || {
         level_ticker_running.set(false);
         level_ticker_generation.update(|generation| *generation += 1);
-        state.settings_window_open.set(false);
     })
+}
+
+/// 中身の高さに合わせて窓を伸縮させる。
+///
+/// 窓の内寸 = 上の帯 + 中身 + 枠の余白 + 下の帯。ここで使う値は、
+/// 実際に描画に使っている定数と同じものを参照している。
+fn fit_window_to_content(content_height: f64) {
+    if content_height <= 0.0 {
+        return;
+    }
+    let needed = TOP_BAR_HEIGHT + content_height + theme::space::XL * 2.0 + BOTTOM_BAR_HEIGHT;
+    let height = needed.clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
+    floem::action::set_window_size(floem::kurbo::Size::new(WINDOW_WIDTH, height));
 }
 
 fn rail_view(
@@ -379,7 +409,7 @@ fn rail_view(
         rail_item(page, SettingsPage::General, "一般", GEAR_ICON),
         rail_item(page, SettingsPage::Microphone, "マイク", MIC_ICON),
         rail_item(page, SettingsPage::Recognition, "認識", WAVE_ICON),
-        rail_item(page, SettingsPage::Advanced, "詳細", SLIDERS_ICON),
+        rail_item(page, SettingsPage::Display, "表示", SLIDERS_ICON),
         // 配布ごとの面。無ければ出さない。
         match extra_label {
             Some(text) => rail_item(page, SettingsPage::Extra, text, SLIDERS_ICON),
@@ -483,7 +513,7 @@ fn page_view(
         SettingsPage::General => general_page(form).into_any(),
         SettingsPage::Microphone => microphone_page(form, state, smooth_level).into_any(),
         SettingsPage::Recognition => recognition_page(form).into_any(),
-        SettingsPage::Advanced => advanced_page(form).into_any(),
+        SettingsPage::Display => display_page(form).into_any(),
         SettingsPage::Extra => match extra {
             Some(entry) => (entry.build)(settings.clone(), state, commands.clone()),
             None => empty().into_any(),
@@ -521,42 +551,9 @@ fn general_page(form: FormState) -> impl IntoView {
             )
             .into_any(),
             setting_row(
-                "バーの位置",
-                caption("話している間に出る入力バーの場所"),
-                Dropdown::new_rw(
-                    form.overlay_position,
-                    [
-                        "中央".to_string(),
-                        "画面の下".to_string(),
-                        "画面の上".to_string(),
-                    ],
-                )
-                .style(dropdown_style),
-            )
-            .into_any(),
-            setting_row(
-                "貼り付けたあとに結果を見せる時間",
-                caption("0 にすると貼り付けと同時に消えます"),
-                h_stack((
-                    slider_control(form.commit_hold_ms),
-                    label(move || {
-                        format!("{} ms", commit_hold_from_pct(form.commit_hold_ms.get()))
-                    })
-                    .style(caption_style),
-                ))
-                .style(|style| style.width(292.0).items_center().gap(theme::space::MD)),
-            )
-            .into_any(),
-            setting_row(
-                "起動時にロゴを見せる時間",
+                "発話が無いときに接続を閉じるまで",
                 caption(""),
-                numeric_field::<u32>(form.splash_ms, "2500", "ms"),
-            )
-            .into_any(),
-            setting_row(
-                "動きを減らす",
-                caption("光の輪や点滅を止めます"),
-                toggle_control(form.reduce_motion, form.reduce_motion),
+                numeric_field::<u32>(form.idle_close_sec, "15", "秒"),
             )
             .into_any(),
         ],
@@ -651,51 +648,66 @@ fn engine_setting_row(selected: RwSignal<AsrEngineChoice>) -> impl IntoView {
         style
             .width_full()
             .min_width(0.0)
-            .min_height(72.0)
+            // 行の高さを固定しない。中身に必要なだけにしておけば面が窓に
+            // 合わせて縮み、スクロールが出にくくなる。以前は 72px を下限に
+            // していたため、48px で足りる行まで 72px を占めていた。
             .padding_horiz(theme::space::LG)
-            .padding_vert(14.0)
+            .padding_vert(theme::space::MD)
             .gap(theme::space::SM)
             .border_bottom(1.0)
             .border_color(theme::color::LINE)
     })
 }
 
-fn advanced_page(form: FormState) -> impl IntoView {
-    let endpoint_heading =
-        label(|| "サーバー側の発話区切り（endpoint_mode=server の接続先だけ）".to_string()).style(
-            |style| {
-                style
-                    .width_full()
-                    .padding_left(16.0)
-                    .padding_top(16.0)
-                    .padding_bottom(4.0)
-                    .font_family(theme::font_family().to_string())
-                    .font_size(theme::text::BODY)
-                    .font_weight(theme::text::BODY_WEIGHT)
-                    .line_height(1.4)
-                    .color(theme::color::INK)
-            },
-        );
+fn display_page(form: FormState) -> impl IntoView {
+    // 以前は「詳細」という箱に、接続の設定と透過表示が混ざっていた。分類が
+    // 噛み合っておらず「一般」が 7 行に膨らんでスクロールしていたので、
+    // 見た目に関わるものをここへ集めた。1 面 5 行までに収める。
+    //
+    // 接続先サーバー URL と VAD モデルのパスは画面から外した。どちらも
+    // 「空なら同梱のものを使う」開発用の逃げ道で、利用者が触るものではない。
+    // 設定そのものは残してあり、OTOA_SERVER_URL と設定ファイルで上書きできる。
     section_page(
-        "詳細",
-        "接続先と、細かな発話区切りを設定します。",
+        "表示",
+        "入力バーの見え方を調整します。",
         vec![
             setting_row(
-                "接続先サーバー URL",
-                caption("空なら同梱のサーバーに繋ぎます"),
-                text_field(form.server_url, "空なら同梱のサーバーに繋ぎます"),
+                "バーの位置",
+                caption("話している間に出る入力バーの場所"),
+                Dropdown::new_rw(
+                    form.overlay_position,
+                    [
+                        "中央".to_string(),
+                        "画面の下".to_string(),
+                        "画面の上".to_string(),
+                    ],
+                )
+                .style(dropdown_style),
             )
             .into_any(),
             setting_row(
-                "VAD モデルのパス",
-                caption("空なら同梱モデル"),
-                text_field(form.vad_model_path, "空なら同梱モデル"),
+                "貼り付けたあとに結果を見せる時間",
+                caption("0 にすると貼り付けと同時に消えます"),
+                h_stack((
+                    slider_control(form.commit_hold_ms),
+                    label(move || {
+                        format!("{} ms", commit_hold_from_pct(form.commit_hold_ms.get()))
+                    })
+                    .style(caption_style),
+                ))
+                .style(|style| style.width(292.0).items_center().gap(theme::space::MD)),
             )
             .into_any(),
             setting_row(
-                "発話が無いときに接続を閉じるまで",
+                "起動時にロゴを見せる時間",
                 caption(""),
-                numeric_field::<u32>(form.idle_close_sec, "15", "秒"),
+                numeric_field::<u32>(form.splash_ms, "2500", "ms"),
+            )
+            .into_any(),
+            setting_row(
+                "動きを減らす",
+                caption("光の輪や点滅を止めます"),
+                toggle_control(form.reduce_motion, form.reduce_motion),
             )
             .into_any(),
             setting_row(
@@ -710,25 +722,6 @@ fn advanced_page(form: FormState) -> impl IntoView {
                     ],
                 )
                 .style(dropdown_style),
-            )
-            .into_any(),
-            endpoint_heading.into_any(),
-            setting_row(
-                "最大遅延",
-                caption("同梱サーバーでは使いません"),
-                numeric_field::<u32>(form.endpoint_max_delay_ms, "1500", "ms"),
-            )
-            .into_any(),
-            setting_row(
-                "感度",
-                caption("同梱サーバーでは使いません"),
-                numeric_field::<f32>(form.endpoint_sensitivity, "0.0", ""),
-            )
-            .into_any(),
-            setting_row(
-                "遅延調整レベル",
-                caption("同梱サーバーでは使いません"),
-                numeric_field::<u8>(form.endpoint_latency_level, "0", ""),
             )
             .into_any(),
         ],
@@ -832,7 +825,18 @@ fn about_page(form: FormState, state: UiState, _settings: Settings) -> impl Into
         label(|| "Otoa Input の情報とライセンスです。".to_string()).style(caption_style),
         container(content).style(card_style),
     ))
-    .style(|style| style.width(488.0).max_width(560.0).gap(theme::space::MD))
+    // 幅を狭くすると説明文が折り返し、1 行 72px の想定が 100px 近くまで
+    // 伸びてスクロールが出る。窓の大きさは一番行数の多い面に合わせてあるので、
+    // ここを勝手に狭めないこと。
+    // 幅は窓に合わせる。狭いと説明文が折り返して行が高くなるので下限を置き、
+    // 広い窓では広がるようにする。
+    .style(|style| {
+        style
+            .width_full()
+            .min_width(520.0)
+            .max_width(760.0)
+            .gap(theme::space::MD)
+    })
 }
 
 fn about_info_block(title: &'static str, value: impl IntoView + 'static) -> impl IntoView {
@@ -1105,9 +1109,11 @@ fn setting_row(
         style
             .width_full()
             .min_width(0.0)
-            .min_height(72.0)
+            // 行の高さを固定しない。中身に必要なだけにしておけば面が窓に
+            // 合わせて縮み、スクロールが出にくくなる。以前は 72px を下限に
+            // していたため、48px で足りる行まで 72px を占めていた。
             .padding_horiz(theme::space::LG)
-            .padding_vert(14.0)
+            .padding_vert(theme::space::MD)
             .items_center()
             .gap(theme::space::LG)
             .border_bottom(1.0)
@@ -1126,7 +1132,18 @@ fn section_page(
         container(v_stack_from_iter(rows).style(|style| style.width_full().min_width(0.0)))
             .style(card_style),
     ))
-    .style(|style| style.width(488.0).max_width(560.0).gap(theme::space::MD))
+    // 幅を狭くすると説明文が折り返し、1 行 72px の想定が 100px 近くまで
+    // 伸びてスクロールが出る。窓の大きさは一番行数の多い面に合わせてあるので、
+    // ここを勝手に狭めないこと。
+    // 幅は窓に合わせる。狭いと説明文が折り返して行が高くなるので下限を置き、
+    // 広い窓では広がるようにする。
+    .style(|style| {
+        style
+            .width_full()
+            .min_width(520.0)
+            .max_width(760.0)
+            .gap(theme::space::MD)
+    })
 }
 
 fn numeric_field<T>(

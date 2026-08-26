@@ -174,22 +174,42 @@ pub(crate) fn open_settings_window(
     state.settings_window_open.set(true);
     let settings = state.settings.get_untracked();
     new_window(
-        move |window_id| match settings_view_override {
-            // 差し替えがあればそちらへ。公開版の画面は settings_view::view
-            // として公開してあるので、差し替え側がそれを土台に使える。
-            Some(build) => build(settings, state, commands, window_id),
-            None => floem::IntoView::into_any(settings_view::view(
-                settings,
-                state,
-                commands,
-                window_id,
-                initial_page,
-                extra_settings_page,
-            )),
+        move |window_id| {
+            let view = match settings_view_override {
+                // 差し替えがあればそちらへ。公開版の画面は settings_view::view
+                // として公開してあるので、差し替え側がそれを土台に使える。
+                Some(build) => build(settings, state, commands, window_id),
+                None => floem::IntoView::into_any(settings_view::view(
+                    settings,
+                    state,
+                    commands,
+                    window_id,
+                    initial_page,
+                    extra_settings_page,
+                )),
+            };
+            // 開いたことを覚えるのはここなので、**戻すのもここでやる。**
+            //
+            // `on_cleanup` は使えない。あれは「view がツリーから外れたとき」に
+            // 呼ばれるもので、ウィンドウを閉じても呼ばれない。実際にログで
+            // 確認した(閉じたあと後始末が一度も走らず、次に開こうとすると
+            // 「既に開いている」と誤判定して二度と開けなくなっていた)。
+            //
+            // floem は窓を壊す直前に `Event::WindowClosed` を投げるので、
+            // そちらを拾う。差し替え画面でも同じように効く。
+            floem::views::Decorators::on_event_stop(
+                view,
+                floem::event::EventListener::WindowClosed,
+                move |_| {
+                    state.settings_window_open.set(false);
+                },
+            )
         },
         Some(
             WindowConfig::default()
-                .size((720.0, 600.0))
+                // ここは開いた瞬間の大きさにすぎない。中身が描かれた時点で
+                // settings_view が窓を中身に合わせて伸縮させる。
+                .size((900.0, 720.0))
                 .title("Otoa Input の設定")
                 .resizable(true),
         ),

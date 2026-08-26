@@ -44,7 +44,16 @@ pub use settings::Settings;
 #[derive(Clone)]
 pub struct ExtraSettingsPage {
     pub label: &'static str,
-    pub build: Arc<dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>) -> floem::AnyView + Send + Sync>,
+    pub build: Arc<
+        dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>) -> floem::AnyView + Send + Sync,
+    >,
+    /// 保存ボタンが押されたときに呼ばれる。この面が持つ設定を書き込む。
+    ///
+    /// **保存ボタンは 1 つにする。** 面が自分の保存ボタンを持つと、
+    /// 公開版の保存が画面を開いた時点の設定から組み直すので、面が書いた
+    /// ぶんが消える（実際にそうなった）。面は「何を足すか」だけを言い、
+    /// 書き込むのは公開版の保存に一本化する。
+    pub apply: Arc<dyn Fn(&mut Settings) + Send + Sync>,
 }
 
 pub type SettingsView = Arc<
@@ -95,6 +104,16 @@ pub fn load_settings() -> anyhow::Result<Settings> {
     settings_io::load()
 }
 
+/// 設定を保存する。
+///
+/// 面を足す配布（[`Deps::extra_settings_page`]）が自分の保存を持つときに要る。
+/// **[`ControllerCommand::UpdateSettings`] を送るだけでは残らない。**
+/// あれは動いている本体へ知らせるだけで、ファイルには書かない。
+/// 送るだけにして、再起動のたびに設定が消えることがあった。
+pub fn save_settings(settings: &Settings) -> anyhow::Result<()> {
+    settings_io::save(settings)
+}
+
 /// 同梱の [`SelfHostedProvider`] で起動する。
 pub fn run_self_hosted() -> anyhow::Result<()> {
     // **設定を読む前に呼ぶ。** 他の配布と設定ファイルを共有しないため。
@@ -119,7 +138,7 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
                       文字を入れたい場所にカーソルを置いてから実行する
   --preview-overlay=<状態>
                       音声・接続なしで入力バーを表示する。
-                      splash/connecting/listening/finalizing/committed/error/login
+                      splash/warming-up/connecting/listening/finalizing/committed/error/login
   --preview-settings[=<面>]
                       音声・接続なしで設定画面を表示する。
                       general/mic/asr/advanced/account/about
@@ -225,13 +244,19 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--preview-overlay は =状態 で指定してください"))?;
         let scenario = wiring::PreviewScenario::parse(value).ok_or_else(|| {
             anyhow::anyhow!(
-                "未知の preview 状態です: {value}（splash/connecting/listening/finalizing/committed/error/login）"
+                "未知の preview 状態です: {value}（splash/warming-up/connecting/listening/finalizing/committed/error/login）"
             )
         })?;
         let settings = load_settings()?;
         let (to_ui, ui_updates) = unbounded_channel();
         let runtime = wiring::start_preview(settings.clone(), scenario, to_ui)?;
-        return ui::run(settings, ui_updates, runtime, deps.settings_view, deps.extra_settings_page);
+        return ui::run(
+            settings,
+            ui_updates,
+            runtime,
+            deps.settings_view,
+            deps.extra_settings_page,
+        );
     }
 
     if let Some(argument) = arguments
@@ -253,7 +278,13 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             wiring::PreviewScenario::Settings(page),
             to_ui,
         )?;
-        return ui::run(settings, ui_updates, runtime, deps.settings_view, deps.extra_settings_page);
+        return ui::run(
+            settings,
+            ui_updates,
+            runtime,
+            deps.settings_view,
+            deps.extra_settings_page,
+        );
     }
 
     if let Some(index) = arguments
@@ -291,7 +322,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
     // 接続先が自分の機械で、まだ誰も待ち受けていなければ、同梱の ASR サーバーを
     // 自分で立てる。**利用者に 2 つ起動させないため。**
     // 接続確認より前に行う。ここを後にすると --check-connection が必ず失敗する。
-    let bundled_server_failure = if let Ok(endpoint) = deps.provider.endpoint(&settings.core) {
+    let bundled_server_failure = if let Ok(endpoint) = deps.provider.endpoint_hint(&settings.core) {
         match bundled_server::start_if_needed(&endpoint.url, &settings.asr_engine) {
             Ok(Some(model_dir)) => {
                 tracing::info!(model_dir = %model_dir.display(), "同梱の ASR サーバーを起動した");
@@ -336,7 +367,13 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         to_ui,
         account_settings_available,
     )?;
-    ui::run(settings, ui_updates, runtime, deps.settings_view, deps.extra_settings_page)
+    ui::run(
+        settings,
+        ui_updates,
+        runtime,
+        deps.settings_view,
+        deps.extra_settings_page,
+    )
 }
 
 #[cfg(test)]

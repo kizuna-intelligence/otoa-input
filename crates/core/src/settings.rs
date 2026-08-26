@@ -48,6 +48,11 @@ pub struct Settings {
     pub vad_model_path: String,
     /// Silero の発話確率しきい値。
     pub vad_threshold: f32,
+    /// 発話中のまま維持する Silero の発話確率しきい値。
+    ///
+    /// 0.35 は、実機で閾値付近の 0.44〜0.58 が振動していた一方、実際の無音では
+    /// 0.26〜0.33 まで下がっていたため、その間に置く。
+    pub vad_release_threshold: f32,
     /// マイク入力に掛ける固定倍率。
     pub input_gain: f32,
     /// 開始と判定するのに必要な連続発話時間。
@@ -56,12 +61,6 @@ pub struct Settings {
     pub vad_min_silence_ms: u32,
     /// 検知前に遡って送る音声の長さ。
     pub preroll_ms: u32,
-    /// ASR サーバー側の発話区切り判定を遅延させる上限。
-    pub endpoint_max_delay_ms: u32,
-    /// ASR サーバー側の発話区切り判定の感度。
-    pub endpoint_sensitivity: f32,
-    /// ASR サーバー側の発話区切り判定の遅延調整レベル。
-    pub endpoint_latency_level: u8,
     /// 最後の発話区切り通知からこれ以上経過したら接続を閉じる秒数。
     pub idle_close_sec: u32,
     /// マイクデバイス ID。空なら既定。
@@ -93,13 +92,11 @@ impl fmt::Debug for Settings {
             .field("listening_enabled", &self.listening_enabled)
             .field("vad_model_path", &self.vad_model_path)
             .field("vad_threshold", &self.vad_threshold)
+            .field("vad_release_threshold", &self.vad_release_threshold)
             .field("input_gain", &self.input_gain)
             .field("vad_min_speech_ms", &self.vad_min_speech_ms)
             .field("vad_min_silence_ms", &self.vad_min_silence_ms)
             .field("preroll_ms", &self.preroll_ms)
-            .field("endpoint_max_delay_ms", &self.endpoint_max_delay_ms)
-            .field("endpoint_sensitivity", &self.endpoint_sensitivity)
-            .field("endpoint_latency_level", &self.endpoint_latency_level)
             .field("idle_close_sec", &self.idle_close_sec)
             .field("microphone", &self.microphone)
             .field("auto_paste", &self.auto_paste)
@@ -123,13 +120,26 @@ impl Default for Settings {
             listening_enabled: true,
             vad_model_path: String::new(),
             vad_threshold: 0.5,
+            // 発話から出る閾値。入る閾値(0.5)と同じ値、すなわちヒステリシス無しが既定。
+            //
+            // 2026-08-25 に一度 0.35 にしたが、それは誤りだった。当時のバタつき
+            // (9 秒の発話が 5 つに刻まれた)の原因は、server モードで無音の必要時間が
+            // 100 ms(4 フレーム)に切り下げられていたことで、閾値の往復ではない。
+            // 無音を 300 ms(10 フレーム)に戻した後は、フレーム数の要求だけで
+            // 十分に抑制できる。0.35 にすると、発話の末尾で確率が 0.40〜0.48 を
+            // うろつく区間を「まだ喋っている」と読み続け、終話が 2.7 秒遅れた。
+            // 本当の無音では 0.24〜0.33 まで落ちる。
+            vad_release_threshold: 0.50,
             input_gain: 1.0,
             vad_min_speech_ms: 200,
-            vad_min_silence_ms: 300,
+            // 2026-08-25 の実測で決めた。録音した実音声 4 セッション(169 秒)に
+            // 端末と同じ Silero VAD を通し、出る閾値 0.30〜0.50 × 無音 200〜500 ms の
+            // 20 通りで SpeechGate を再現した結果、分割ゼロかつ終話が最速だったのが
+            // 出る閾値 0.50 / 無音 400 ms(実効 416 ms、13 フレーム)である。
+            // そのときの「発話終端 → 終話」は中央値 464 ms、最大 768 ms。
+            // 300 ms では 26 候補中 3 件が 2 分割された。
+            vad_min_silence_ms: 400,
             preroll_ms: 500,
-            endpoint_max_delay_ms: 1500,
-            endpoint_sensitivity: 0.0,
-            endpoint_latency_level: 0,
             idle_close_sec: 15,
             microphone: String::new(),
             auto_paste: true,
@@ -199,16 +209,17 @@ mod tests {
     }
 
     #[test]
-    fn default_endpoint_tuning_favors_complete_utterances() {
-        let settings = Settings::default();
-        assert_eq!(settings.endpoint_max_delay_ms, 1500);
-        assert_eq!(settings.endpoint_sensitivity, 0.0);
-        assert_eq!(settings.endpoint_latency_level, 0);
+    fn commit_hold_defaults_to_900_ms() {
+        assert_eq!(Settings::default().commit_hold_ms, 900);
     }
 
     #[test]
-    fn commit_hold_defaults_to_900_ms() {
-        assert_eq!(Settings::default().commit_hold_ms, 900);
+    fn vad_release_threshold_defaults_to_0_50_and_can_be_configured() {
+        assert_eq!(Settings::default().vad_release_threshold, 0.50);
+
+        let settings: Settings = serde_json::from_str(r#"{"vad_release_threshold":0.4}"#)
+            .expect("settings should deserialize");
+        assert_eq!(settings.vad_release_threshold, 0.4);
     }
 
     #[test]

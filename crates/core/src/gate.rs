@@ -6,6 +6,7 @@ pub enum GateEvent {
 
 pub struct SpeechGate {
     threshold: f32,
+    release_threshold: f32,
     min_speech_frames: usize,
     min_silence_frames: usize,
     speaking: bool,
@@ -13,9 +14,26 @@ pub struct SpeechGate {
 }
 
 impl SpeechGate {
-    pub fn new(threshold: f32, min_speech_frames: usize, min_silence_frames: usize) -> Self {
+    pub fn new(
+        threshold: f32,
+        release_threshold: f32,
+        min_speech_frames: usize,
+        min_silence_frames: usize,
+    ) -> Self {
+        let release_threshold = if release_threshold > threshold {
+            tracing::warn!(
+                threshold,
+                release_threshold,
+                "VAD release threshold exceeds speech threshold; clamping to speech threshold"
+            );
+            threshold
+        } else {
+            release_threshold
+        };
+
         Self {
             threshold,
+            release_threshold,
             min_speech_frames,
             min_silence_frames: min_silence_frames.max(1),
             speaking: false,
@@ -44,7 +62,7 @@ impl SpeechGate {
         // この SpeechEnded は ASR セッションの終了には使わず、次の発話の検知にだけ使う。
         // 発話の区切りは ASR サーバーからの `<end>` で確定する。
         // ここを消すと speaking が true のままになり、二度と SpeechStarted が出ない。
-        if over {
+        if prob >= self.release_threshold {
             self.run = 0;
         } else {
             self.run += 1;
@@ -73,7 +91,7 @@ mod tests {
 
     #[test]
     fn no_event_below_min_speech() {
-        let mut gate = SpeechGate::new(0.5, 3, 3);
+        let mut gate = SpeechGate::new(0.5, 0.5, 3, 3);
         assert_eq!(gate.push(0.5), None);
         assert_eq!(gate.push(0.6), None);
         assert!(!gate.is_speaking());
@@ -81,7 +99,7 @@ mod tests {
 
     #[test]
     fn emits_started_at_min_speech() {
-        let mut gate = SpeechGate::new(0.5, 3, 3);
+        let mut gate = SpeechGate::new(0.5, 0.5, 3, 3);
         assert_eq!(gate.push(0.5), None);
         assert_eq!(gate.push(0.7), None);
         assert_eq!(gate.push(0.9), Some(GateEvent::SpeechStarted));
@@ -89,7 +107,7 @@ mod tests {
 
     #[test]
     fn run_resets_on_gap() {
-        let mut gate = SpeechGate::new(0.5, 3, 3);
+        let mut gate = SpeechGate::new(0.5, 0.5, 3, 3);
         assert_eq!(gate.push(0.8), None);
         assert_eq!(gate.push(0.8), None);
         assert_eq!(gate.push(0.2), None);
@@ -99,7 +117,7 @@ mod tests {
 
     #[test]
     fn silence_does_not_emit_end() {
-        let mut gate = SpeechGate::new(0.5, 1, 3);
+        let mut gate = SpeechGate::new(0.5, 0.5, 1, 3);
         assert_eq!(gate.push(0.8), Some(GateEvent::SpeechStarted));
         assert_eq!(gate.push(0.2), None);
         assert_eq!(gate.push(0.2), None);
@@ -107,14 +125,26 @@ mod tests {
     }
 
     #[test]
+    fn a_single_silent_vad_edge_does_not_chatter_the_gate() {
+        let mut gate = SpeechGate::new(0.5, 0.5, 1, 4);
+        assert_eq!(gate.push(0.8), Some(GateEvent::SpeechStarted));
+
+        // 素の VAD は「有声 → 無音 → 有声」を一瞬だけ返すことがある。
+        // 無音のフレームが 4 つ続くまでは終わりと見なさない。
+        assert_eq!(gate.push(0.2), None);
+        assert_eq!(gate.push(0.8), None);
+        assert!(gate.is_speaking());
+    }
+
+    #[test]
     fn threshold_is_inclusive() {
-        let mut gate = SpeechGate::new(0.5, 1, 3);
+        let mut gate = SpeechGate::new(0.5, 0.5, 1, 3);
         assert_eq!(gate.push(0.5), Some(GateEvent::SpeechStarted));
     }
 
     #[test]
     fn no_duplicate_started() {
-        let mut gate = SpeechGate::new(0.5, 1, 3);
+        let mut gate = SpeechGate::new(0.5, 0.5, 1, 3);
         assert_eq!(gate.push(0.8), Some(GateEvent::SpeechStarted));
         assert_eq!(gate.push(0.8), None);
         assert_eq!(gate.push(0.8), None);
@@ -125,7 +155,7 @@ mod tests {
         // 回帰テスト: 一度発話を検知したあと無音が続けば、
         // 次の発話でも SpeechStarted が出ること。
         // これが壊れると、起動後に発話を 1 回しか検知できなくなる。
-        let mut gate = SpeechGate::new(0.5, 2, 3);
+        let mut gate = SpeechGate::new(0.5, 0.5, 2, 3);
         assert_eq!(gate.push(0.9), None);
         assert_eq!(gate.push(0.9), Some(GateEvent::SpeechStarted));
         assert!(gate.is_speaking());
@@ -141,12 +171,48 @@ mod tests {
 
     #[test]
     fn brief_dip_does_not_end_speech() {
-        let mut gate = SpeechGate::new(0.5, 1, 3);
+        let mut gate = SpeechGate::new(0.5, 0.5, 1, 3);
         assert_eq!(gate.push(0.9), Some(GateEvent::SpeechStarted));
         assert_eq!(gate.push(0.0), None);
         assert_eq!(gate.push(0.9), None);
         assert_eq!(gate.push(0.0), None);
         assert_eq!(gate.push(0.0), None);
         assert_eq!(gate.push(0.0), Some(GateEvent::SpeechEnded));
+    }
+
+    #[test]
+    fn hysteresis_keeps_speech_active_while_probabilities_cross_the_start_threshold() {
+        let mut gate = SpeechGate::new(0.5, 0.35, 1, 3);
+        assert_eq!(gate.push(0.5), Some(GateEvent::SpeechStarted));
+
+        // 0.5 と 0.4 を往復しても、どちらも release_threshold 以上なので
+        // SpeechEnded にはならない。
+        for probability in [0.4, 0.5, 0.4, 0.5, 0.4] {
+            assert_eq!(gate.push(probability), None);
+        }
+        assert!(gate.is_speaking());
+    }
+
+    #[test]
+    fn probability_below_release_threshold_ends_speech() {
+        let mut gate = SpeechGate::new(0.5, 0.35, 1, 3);
+        assert_eq!(gate.push(0.5), Some(GateEvent::SpeechStarted));
+
+        assert_eq!(gate.push(0.3), None);
+        assert_eq!(gate.push(0.3), None);
+        assert_eq!(gate.push(0.3), Some(GateEvent::SpeechEnded));
+        assert!(!gate.is_speaking());
+    }
+
+    #[test]
+    fn release_threshold_above_speech_threshold_is_clamped() {
+        let mut gate = SpeechGate::new(0.5, 0.7, 1, 1);
+        assert_eq!(gate.release_threshold, 0.5);
+        assert_eq!(gate.push(0.5), Some(GateEvent::SpeechStarted));
+
+        // 0.6 は threshold を超えるため、0.7 のままではなく 0.5 に
+        // クランプされていることが分かる。
+        assert_eq!(gate.push(0.6), None);
+        assert!(gate.is_speaking());
     }
 }
