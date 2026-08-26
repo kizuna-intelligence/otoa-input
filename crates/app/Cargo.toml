@@ -20,6 +20,7 @@ otoa-input-protocol = { path = "../protocol" }
 otoa-input-vad = { path = "../vad" }
 anyhow.workspace = true
 crossbeam-channel.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

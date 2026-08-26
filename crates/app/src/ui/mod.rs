@@ -88,14 +88,6 @@ pub fn run(
     let ui_signal = create_signal_from_channel(ui_updates);
     let (tray_actions, tray_events) = crossbeam_channel::unbounded();
     let (tray_updates, tray_update_rx) = crossbeam_channel::unbounded();
-    if let Err(error) = tray::install(
-        runtime.commands.clone(),
-        tray_actions,
-        tray_update_rx,
-        account_settings_available,
-    ) {
-        tracing::warn!("failed to initialize tray; continuing without tray: {error:#}");
-    }
     let tray_updates_for_ui = tray_updates.clone();
     create_effect(move |_| {
         if let Some(update) = ui_signal.get() {
@@ -132,6 +124,19 @@ pub fn run(
             let _ = command_for_termination.send(ControllerCommand::Shutdown);
         }
     });
+    // トレイの生成は **イベントループを作った後** に行う。macOS/Windows では
+    // `TrayIconBuilder::build()` が NSApplication を初期化するため、winit が
+    // イベントループ（＝principal class）を握る前に呼ぶと
+    // 「requires control over the principal class」で落ちる。Linux は別スレッドの
+    // 独自ループで動くのでこの制約はないが、順序を分けないでここへ寄せておく。
+    if let Err(error) = tray::install(
+        runtime.commands.clone(),
+        tray_actions,
+        tray_update_rx,
+        account_settings_available,
+    ) {
+        tracing::warn!("failed to initialize tray; continuing without tray: {error:#}");
+    }
     #[cfg(target_os = "linux")]
     schedule_overlay_hints();
     let window_state = state;

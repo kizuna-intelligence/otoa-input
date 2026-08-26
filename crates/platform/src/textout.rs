@@ -50,6 +50,15 @@ pub struct TextOutput {
     restore_primary_selection: bool,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     clipboard: arboard::Clipboard,
+    /// 一度作れた `Enigo` を持ち続けるための場所。詳しくは
+    /// [`TextOutput::send_paste_shortcut`] を見ること。
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    enigo: Option<Enigo>,
+    /// `Enigo` を作れなかった理由。**作れなかったことも覚えておく。**
+    /// 覚えないと、権限が無い間ずっと作り直しに行き、そのたびに
+    /// macOS の許可ダイアログが出る。
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    enigo_failure: Option<String>,
 }
 
 impl TextOutput {
@@ -82,7 +91,73 @@ impl TextOutput {
             restore_primary_selection: true,
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             clipboard,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            enigo: None,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            enigo_failure: None,
         })
+    }
+
+    /// 起動時に、貼り付けに要る権限を一度だけ確かめる。
+    ///
+    /// **ここでしかダイアログを出さない。** 貼り付けのたびに確かめると
+    /// 発話するたびに許可を聞かれてしまう。権限が無いまま起動したときは、
+    /// その理由を返して呼び手が利用者へ伝えられるようにする。
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub fn check_paste_permission(&mut self) -> Option<String> {
+        if self.enigo.is_some() {
+            return None;
+        }
+        match new_enigo() {
+            Ok(enigo) => {
+                self.enigo = Some(enigo);
+                self.enigo_failure = None;
+                None
+            }
+            Err(error) => {
+                let reason = format!("{error:#}");
+                self.enigo_failure = Some(reason.clone());
+                Some(reason)
+            }
+        }
+    }
+
+    /// 貼り付けの権限は Linux では要らない。
+    #[cfg(target_os = "linux")]
+    pub fn check_paste_permission(&mut self) -> Option<String> {
+        None
+    }
+
+    /// 貼り付けキーを送る。
+    ///
+    /// **`Enigo` は作れても作れなくても、結果を覚えて使い回す。** macOS の
+    /// `Enigo::new` はアクセシビリティ権限の有無を調べ、無ければシステムの
+    /// 許可ダイアログを出す。貼り付けごとに作り直すと、権限が無い間は
+    /// 発話するたびに許可を聞かれてしまう。
+    ///
+    /// 一度失敗しても、権限が後から付いたなら黙って復帰する。そちらの確認は
+    /// ダイアログを出さない [`accessibility_granted`] で行う。
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn send_paste_shortcut(&mut self) -> Result<()> {
+        if let Some(reason) = &self.enigo_failure {
+            if !accessibility_granted() {
+                return Err(anyhow::anyhow!(reason.clone()));
+            }
+            tracing::info!("アクセシビリティ権限が付いたので貼り付けを再開する");
+            self.enigo_failure = None;
+        }
+        let enigo = match self.enigo {
+            Some(ref mut enigo) => enigo,
+            None => match new_enigo() {
+                Ok(enigo) => self.enigo.insert(enigo),
+                Err(error) => {
+                    let reason = format!("{error:#}");
+                    self.enigo_failure = Some(reason.clone());
+                    return Err(anyhow::anyhow!(reason));
+                }
+            },
+        };
+        press_paste_shortcut(enigo)
     }
 
     /// 貼り付けキーを設定する。Linux では `auto` の解決結果もここへ渡す。
@@ -131,7 +206,7 @@ impl TextOutput {
                         Ok(())
                     } else {
                         thread::sleep(Duration::from_millis(80));
-                        send_paste_shortcut()
+                        self.send_paste_shortcut()
                     }
                 })()
             }
@@ -645,19 +720,70 @@ fn send_paste_shortcut(shortcut: PasteShortcut) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn send_paste_shortcut() -> Result<()> {
-    let mut enigo = Enigo::new(&Settings::default()).context("failed to initialize enigo")?;
+fn new_enigo() -> Result<Enigo> {
+    Enigo::new(&Settings::default()).context("failed to initialize enigo")
+}
+
+#[cfg(target_os = "windows")]
+fn press_paste_shortcut(enigo: &mut Enigo) -> Result<()> {
     enigo.key(Key::Control, Press)?;
     enigo.key(Key::Unicode('v'), Click)?;
     enigo.key(Key::Control, Release)?;
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn accessibility_granted() -> bool {
+    true
+}
+
+// アクセシビリティ権限があるかを **ダイアログを出さずに** 調べる。
+//
+// `Enigo::new` も権限を見るが、無いときはシステムのダイアログを出す。
+// 貼り付けのたびにそれを呼ぶと発話ごとに聞かれてしまうので、以後の確認は
+// こちらを使う。要求するのは起動時の一度だけにする。
 #[cfg(target_os = "macos")]
-fn send_paste_shortcut() -> Result<()> {
-    let mut enigo = Enigo::new(&Settings::default()).context("failed to initialize enigo")?;
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXIsProcessTrusted() -> u8;
+}
+
+#[cfg(target_os = "macos")]
+fn accessibility_granted() -> bool {
+    // Boolean(unsigned char) が返る。0 以外が true。
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn new_enigo() -> Result<Enigo> {
+    // macOS はキー入力の合成にアクセシビリティ権限を要求する。**ここが
+    // 失敗する一番よくある理由なので、何をすればよいかまで書く。**
+    Enigo::new(&Settings::default()).map_err(|error| {
+        anyhow::anyhow!(
+            "貼り付けできません（{error}）。システム設定 > プライバシーとセキュリティ \
+             > アクセシビリティ で Otoa Input を許可してください。許可すればそのまま貼り付きます。\
+             それまでの間も、認識した文字はクリップボードに入っています。"
+        )
+    })
+}
+
+/// macOS の V キーの仮想キーコード（`kVK_ANSI_V`）。
+///
+/// **ここで `Key::Unicode('v')` を使ってはいけない。** enigo は文字から
+/// キーコードを引くために HIToolbox の TSM を呼ぶが、これはメインスレッド
+/// からしか呼べない。貼り付けはコントローラのスレッドから走るので、
+/// `dispatch_assert_queue` に引っかかってプロセスごと落ちる。生のキーコードを
+/// 渡せば配列を引かないので、その経路を通らない。
+///
+/// キーコードは配列ではなくキーの位置を指す。Cmd+V の位置は
+/// 一般的な配列で共通なので、これで問題ない。
+#[cfg(target_os = "macos")]
+const MACOS_V_KEYCODE: u32 = 9;
+
+#[cfg(target_os = "macos")]
+fn press_paste_shortcut(enigo: &mut Enigo) -> Result<()> {
     enigo.key(Key::Meta, Press)?;
-    enigo.key(Key::Unicode('v'), Click)?;
+    enigo.key(Key::Other(MACOS_V_KEYCODE), Click)?;
     enigo.key(Key::Meta, Release)?;
     Ok(())
 }

@@ -23,6 +23,7 @@ mod bundled_server;
 mod check_connection;
 mod connection;
 mod controller;
+mod model_download;
 mod settings;
 mod settings_io;
 pub mod ui;
@@ -322,24 +323,17 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
     // 接続先が自分の機械で、まだ誰も待ち受けていなければ、同梱の ASR サーバーを
     // 自分で立てる。**利用者に 2 つ起動させないため。**
     // 接続確認より前に行う。ここを後にすると --check-connection が必ず失敗する。
-    let bundled_server_failure = if let Ok(endpoint) = deps.provider.endpoint_hint(&settings.core) {
-        match bundled_server::start_if_needed(&endpoint.url, &settings.asr_engine) {
-            Ok(Some(model_dir)) => {
-                tracing::info!(model_dir = %model_dir.display(), "同梱の ASR サーバーを起動した");
-                None
-            }
-            Ok(None) => None,
-            // 起動できなくても続ける。設定画面でエンジンや接続先を直せるようにする。
-            Err(failure) => {
+    // 接続確認モードだけは、ここで同期に立ててから確かめる。ここを飛ばすと
+    // --check-connection が必ず失敗する。GUI 起動では、モデルの自動ダウンロードで
+    // 画面が出ないまま固まって見えないよう、コントローラが裏で立てる。
+    if check_connection {
+        if let Ok(endpoint) = deps.provider.endpoint_hint(&settings.core) {
+            if let Err(failure) =
+                bundled_server::start_if_needed(&endpoint.url, &settings.asr_engine, &mut |_| {})
+            {
                 tracing::warn!(message = %failure, "同梱の ASR サーバーを起動できない");
-                Some(failure.into_readiness_message())
             }
         }
-    } else {
-        None
-    };
-
-    if check_connection {
         std::process::exit(check_connection::run(&settings, deps.provider));
     }
 
@@ -360,10 +354,12 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
     let (to_ui, ui_updates) = unbounded_channel();
     let account_settings_available =
         deps.provider.prepare().is_some() || deps.provider.account().is_some();
+    // 同梱サーバーの起動（必要ならモデルの自動ダウンロード）はコントローラが
+    // 起動時に行う。失敗は readiness としてそこで持つので、ここでは渡さない。
     let runtime = wiring::start(
         settings.clone(),
         deps.provider,
-        bundled_server_failure,
+        None,
         to_ui,
         account_settings_available,
     )?;

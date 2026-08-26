@@ -38,4 +38,6 @@ ndarray = "0.16"
 # 上流の最新には入っているが、0.2.0 からの差が大きく(45 箇所が壊れる)、
 # 見た目の回帰を伴う移行になるため、0.2.0 に set_window_size だけを足した。
 [patch.crates-io]
-floem = { git = "https://github.com/kizuna-intelligence/floem", branch = "feat/set-window-size" }
+# 我々のフォークを使う。上流 0.2 には、窓を中身に合わせて伸縮する手段も、
+# 透過窓の黒縁（macOS）の修正も入っていない。
+floem = { git = "https://github.com/kizuna-intelligence/floem", branch = "main" }

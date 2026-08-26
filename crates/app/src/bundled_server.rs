@@ -127,6 +127,47 @@ fn startup_error(
     }
 }
 
+/// 認識モデルを自動ダウンロードし、その置き場所を返す。
+///
+/// 落とし先はユーザーのデータ領域 `models/<名前>`。ここは
+/// [`model_directories`] の探索先に含まれているので、次回以降は
+/// ダウンロードせずに見つかる。
+fn download_model(
+    engine: AsrEngine,
+    engine_name: &str,
+    candidates: &[PathBuf],
+    progress: &mut dyn FnMut(crate::model_download::Progress),
+) -> Result<PathBuf, StartupFailure> {
+    let (directory_name, _) = model_details(engine);
+    let Some(models_root) = dirs_data_directory().map(|data| data.join("models")) else {
+        let reason = format!("認識モデル {directory_name} の保存先（データ領域）が分かりません。");
+        return Err(startup_error(
+            engine_name,
+            candidates,
+            &reason,
+            reason.clone(),
+        ));
+    };
+    tracing::info!(
+        engine = engine_name,
+        model = directory_name,
+        "認識モデルが見つからないので自動ダウンロードします"
+    );
+    crate::model_download::ensure(engine, &models_root, |status| progress(status)).map_err(
+        |error| {
+            let reason =
+                format!("認識モデル {directory_name} の自動ダウンロードに失敗しました: {error:#}");
+            startup_error(
+                engine_name,
+                candidates,
+                &reason,
+                "認識モデルのダウンロードに失敗しました。通信環境を確かめて起動し直してください。"
+                    .to_string(),
+            )
+        },
+    )
+}
+
 /// 同梱サーバーを起動する必要があるか調べ、必要なら起動する。
 ///
 /// 起動できなかった理由は戻り値で返す。**起動しないこと自体は失敗ではない。**
@@ -134,6 +175,7 @@ fn startup_error(
 pub(crate) fn start_if_needed(
     server_url: &str,
     engine: &str,
+    progress: &mut dyn FnMut(crate::model_download::Progress),
 ) -> Result<Option<PathBuf>, StartupFailure> {
     let Some(address) = local_address(server_url) else {
         return Ok(None); // 自分の機械ではない
@@ -152,19 +194,13 @@ pub(crate) fn start_if_needed(
         tracing::info!(%address, "ASR サーバーは既に動いているので起動しない");
         return Ok(None);
     }
-    let (directory_name, _) = model_details(engine);
     let candidates = model_directories(engine);
-    let Some(model_dir) = model_directory(engine, &candidates) else {
-        let reason = format!(
-            "認識モデル {directory_name} が見つかりません。\
-             設定から認識エンジンを選び直すか、README の手順でモデルを置いてください。"
-        );
-        return Err(startup_error(
-            engine_name,
-            &candidates,
-            &reason,
-            reason.clone(),
-        ));
+    // 見つからなければ、その場で落としてくる。同梱すると配布物が数百 MB
+    // 膨らむので、初回だけ Hugging Face から取る。落とし先はユーザーの
+    // データ領域で、上の探索先に含まれている。
+    let model_dir = match model_directory(engine, &candidates) {
+        Some(model_dir) => model_dir,
+        None => download_model(engine, engine_name, &candidates, progress)?,
     };
 
     let port = address.port();
@@ -280,8 +316,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listen on test port");
         let address = listener.local_addr().expect("test address");
 
-        let error = start_if_needed(&format!("ws://{address}/asr/v1"), "misspelled-engine")
-            .expect_err("unknown engine should be reported");
+        let error = start_if_needed(
+            &format!("ws://{address}/asr/v1"),
+            "misspelled-engine",
+            &mut |_| {},
+        )
+        .expect_err("unknown engine should be reported");
 
         let log_message = error.to_string();
         assert!(log_message.contains("選択中の認識エンジン: misspelled-engine"));
