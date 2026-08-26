@@ -2,11 +2,13 @@ use crate::settings::Settings;
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use otoa_input_core::Account;
 use otoa_input_core::{
-    ConnectionProvider, EnrollOutcome, EnrollReason, GateEvent, PreRoll, Readiness, Session,
-    SessionInput, SessionState, SpeechGate, Transcript,
+    ConnectionProvider, EnrollOutcome, EnrollReason, GateEvent, PasteShortcutSetting, PreRoll,
+    Readiness, Session, SessionInput, SessionState, SpeechGate, Transcript,
 };
-use otoa_input_platform::{AudioCapture, AudioFrame, PasteMethod, TextOutput};
-use otoa_input_protocol::{AsrCommand, AsrConfig, AsrError, AsrEvent, AsrSession, AsrToken};
+use otoa_input_platform::{AudioCapture, AudioFrame, PasteMethod, PasteShortcut, TextOutput};
+use otoa_input_protocol::{
+    AsrCommand, AsrConfig, AsrError, AsrEvent, AsrSession, AsrToken, EndpointTuning,
+};
 use otoa_input_vad::{VAD_FRAME_MS, VAD_SAMPLE_RATE};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -41,6 +43,21 @@ const CONNECTING_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSING_TIMEOUT: Duration = Duration::from_secs(8);
 const GATEWAY_URL_MISSING_MESSAGE: &str =
     "ゲートウェイURLが設定されていません。設定画面の「詳細」で指定してください。";
+
+fn configure_text_output(text_out: &mut TextOutput, settings: &Settings) {
+    text_out.set_paste_shortcut(resolve_paste_shortcut(settings.paste_shortcut));
+    text_out.set_restore_primary_selection(settings.restore_primary_selection);
+}
+
+fn resolve_paste_shortcut(setting: PasteShortcutSetting) -> PasteShortcut {
+    match setting {
+        PasteShortcutSetting::Auto | PasteShortcutSetting::ShiftInsert => {
+            PasteShortcut::ShiftInsert
+        }
+        PasteShortcutSetting::CtrlV => PasteShortcut::CtrlV,
+        PasteShortcutSetting::CtrlShiftV => PasteShortcut::CtrlShiftV,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverlayView {
@@ -458,6 +475,8 @@ impl Controller {
         let gate = gate_from_settings(&settings);
         let preroll = PreRoll::new(milliseconds_to_samples(settings.preroll_ms));
         let splash_started_at = Instant::now();
+        let mut text_out = TextOutput::new()?;
+        configure_text_output(&mut text_out, &settings);
         Ok(Self {
             session: Session::new(),
             transcript: Transcript::new(),
@@ -466,7 +485,7 @@ impl Controller {
             pending_audio_dropped_frames: 0,
             to_asr: None,
             to_ui,
-            text_out: TextOutput::new()?,
+            text_out,
             facts: Facts {
                 session: SessionState::Disabled,
                 gate: GateState::Idle,
@@ -479,7 +498,8 @@ impl Controller {
                 finalizing: false,
             },
             epoch: 0,
-            overlay: OverlayView::Hidden,
+            // 起動直後はロゴを見せる。main の既定に合わせる。
+            overlay: OverlayView::Splash,
             #[cfg(test)]
             overlay_error_until: None,
             #[cfg(test)]
@@ -1117,6 +1137,7 @@ impl Controller {
 
     fn update_settings(&mut self, settings: Settings) {
         let microphone_changed = self.settings.microphone != settings.microphone;
+        configure_text_output(&mut self.text_out, &settings);
         let product_settings = settings.product_settings_value();
         self.provider
             .update_settings(&settings.core, product_settings.as_ref());
@@ -1915,7 +1936,6 @@ impl Controller {
     }
 
     fn periodic(&mut self) {
-        self.text_out.poll_paste_target();
         self.log_audio_progress();
         self.prune_level_window(Instant::now());
         let status = level_status(
@@ -2527,6 +2547,7 @@ impl Controller {
             return;
         };
         let was_enabled = self.settings.listening_enabled;
+        configure_text_output(&mut self.text_out, &settings);
         self.settings = settings;
         self.rebuild_vad_configuration();
         if was_enabled && !self.settings.listening_enabled {
@@ -2740,17 +2761,18 @@ mod tests {
     use super::{
         apply_input_gain, combine_readiness, failed_retry_is_due, gate_from_settings,
         idle_close_is_due, is_loopback_host, is_nonfatal_asr_error, is_user_action_failure_message,
-        level_status, next_enroll_retry_delay, next_failed_retry_delay, Controller, LevelStatus,
-        OverlayKind, OverlayView, WarmupReason, WarmupResult, ENROLL_RETRY_INITIAL,
-        ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX, GATEWAY_URL_MISSING_MESSAGE,
-        OVERLAY_NOTICE_DURATION, PENDING_AUDIO_LIMIT, SERVER_RESPONSE_STARTING_OVERLAY_DELAY,
-        SERVER_RESPONSE_WAITING_OVERLAY_DELAY, WARMUP_IDLE_THRESHOLD,
+        level_status, next_enroll_retry_delay, next_failed_retry_delay, resolve_paste_shortcut,
+        Controller, LevelStatus, OverlayKind, OverlayView, WarmupReason, WarmupResult,
+        ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
+        GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION, PENDING_AUDIO_LIMIT,
+        SERVER_RESPONSE_STARTING_OVERLAY_DELAY, SERVER_RESPONSE_WAITING_OVERLAY_DELAY,
+        WARMUP_IDLE_THRESHOLD,
     };
     use crate::connection::SelfHostedProvider;
     use crate::settings::Settings;
     use otoa_input_core::{
         Account, ConnectionProvider, Endpoint, EnrollOutcome, EnrollReason, GateEvent,
-        PrepareAction, Readiness, SessionInput, SessionState,
+        PasteShortcutSetting, PrepareAction, Readiness, SessionInput, SessionState,
     };
     use otoa_input_protocol::{AsrCommand, AsrError, AsrEvent, AsrToken};
     use std::sync::{
@@ -3181,6 +3203,14 @@ mod tests {
         assert!(is_user_action_failure_message(
             "参照音声が見つかりません。設定の「声」で声を登録し直してから、もう一度話してください。"
         ));
+    }
+
+    #[test]
+    fn auto_paste_shortcut_resolves_to_shift_insert() {
+        assert_eq!(
+            resolve_paste_shortcut(PasteShortcutSetting::Auto),
+            otoa_input_platform::PasteShortcut::ShiftInsert
+        );
     }
 
     #[test]
