@@ -1,0 +1,22 @@
+{
+  "name": "cyborgy-sql-asset-registry",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: cyborgy-sql-asset-registry",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "cyborgy-sql-asset-registry",
+    "shortDescription": "Cyborgy skill: cyborgy-sql-asset-registry",
+    "longDescription": "Installs the Cyborgy workspace skill cyborgy-sql-asset-registry.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use cyborgy-sql-asset-registry."
+    ]
+  }
+}

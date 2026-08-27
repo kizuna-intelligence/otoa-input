@@ -1,0 +1,22 @@
+{
+  "name": "document-math-typesetting-quality",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: document-math-typesetting-quality",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "document-math-typesetting-quality",
+    "shortDescription": "Cyborgy skill: document-math-typesetting-quality",
+    "longDescription": "Installs the Cyborgy workspace skill document-math-typesetting-quality.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use document-math-typesetting-quality."
+    ]
+  }
+}

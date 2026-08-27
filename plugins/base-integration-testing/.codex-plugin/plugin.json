@@ -1,0 +1,22 @@
+{
+  "name": "base-integration-testing",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-integration-testing",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-integration-testing",
+    "shortDescription": "Cyborgy skill: base-integration-testing",
+    "longDescription": "Installs the Cyborgy workspace skill base-integration-testing.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-integration-testing."
+    ]
+  }
+}

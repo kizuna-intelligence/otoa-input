@@ -1,0 +1,22 @@
+{
+  "name": "cyborgy-api-without-mcp",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: cyborgy-api-without-mcp",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "cyborgy-api-without-mcp",
+    "shortDescription": "Cyborgy skill: cyborgy-api-without-mcp",
+    "longDescription": "Installs the Cyborgy workspace skill cyborgy-api-without-mcp.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use cyborgy-api-without-mcp."
+    ]
+  }
+}

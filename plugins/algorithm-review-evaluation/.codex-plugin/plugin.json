@@ -1,0 +1,22 @@
+{
+  "name": "algorithm-review-evaluation",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: algorithm-review-evaluation",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "algorithm-review-evaluation",
+    "shortDescription": "Cyborgy skill: algorithm-review-evaluation",
+    "longDescription": "Installs the Cyborgy workspace skill algorithm-review-evaluation.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use algorithm-review-evaluation."
+    ]
+  }
+}

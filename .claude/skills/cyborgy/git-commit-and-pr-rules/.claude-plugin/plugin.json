@@ -1,0 +1,8 @@
+{
+  "name": "git-commit-and-pr-rules",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: git-commit-and-pr-rules",
+  "author": {
+    "name": "Cyborgy"
+  }
+}

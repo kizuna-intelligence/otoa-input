@@ -1,0 +1,22 @@
+{
+  "name": "amd-gpu-rocm-stack",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: amd-gpu-rocm-stack",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "amd-gpu-rocm-stack",
+    "shortDescription": "Cyborgy skill: amd-gpu-rocm-stack",
+    "longDescription": "Installs the Cyborgy workspace skill amd-gpu-rocm-stack.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use amd-gpu-rocm-stack."
+    ]
+  }
+}

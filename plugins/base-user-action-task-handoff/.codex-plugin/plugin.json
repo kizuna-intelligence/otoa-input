@@ -1,0 +1,22 @@
+{
+  "name": "base-user-action-task-handoff",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-user-action-task-handoff",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-user-action-task-handoff",
+    "shortDescription": "Cyborgy skill: base-user-action-task-handoff",
+    "longDescription": "Installs the Cyborgy workspace skill base-user-action-task-handoff.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-user-action-task-handoff."
+    ]
+  }
+}

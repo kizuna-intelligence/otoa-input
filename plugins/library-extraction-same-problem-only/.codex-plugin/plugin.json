@@ -1,0 +1,22 @@
+{
+  "name": "library-extraction-same-problem-only",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: library-extraction-same-problem-only",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "library-extraction-same-problem-only",
+    "shortDescription": "Cyborgy skill: library-extraction-same-problem-only",
+    "longDescription": "Installs the Cyborgy workspace skill library-extraction-same-problem-only.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use library-extraction-same-problem-only."
+    ]
+  }
+}

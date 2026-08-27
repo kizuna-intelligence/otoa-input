@@ -1,0 +1,22 @@
+{
+  "name": "base-graphiti-memory",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-graphiti-memory",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-graphiti-memory",
+    "shortDescription": "Cyborgy skill: base-graphiti-memory",
+    "longDescription": "Installs the Cyborgy workspace skill base-graphiti-memory.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-graphiti-memory."
+    ]
+  }
+}

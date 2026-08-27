@@ -1,0 +1,22 @@
+{
+  "name": "kizuna-printer-defaults",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: kizuna-printer-defaults",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "kizuna-printer-defaults",
+    "shortDescription": "Cyborgy skill: kizuna-printer-defaults",
+    "longDescription": "Installs the Cyborgy workspace skill kizuna-printer-defaults.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use kizuna-printer-defaults."
+    ]
+  }
+}

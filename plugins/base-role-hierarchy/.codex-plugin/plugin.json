@@ -1,0 +1,22 @@
+{
+  "name": "base-role-hierarchy",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-role-hierarchy",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-role-hierarchy",
+    "shortDescription": "Cyborgy skill: base-role-hierarchy",
+    "longDescription": "Installs the Cyborgy workspace skill base-role-hierarchy.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-role-hierarchy."
+    ]
+  }
+}

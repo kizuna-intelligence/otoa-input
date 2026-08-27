@@ -1,0 +1,22 @@
+{
+  "name": "base-api-usage",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-api-usage",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-api-usage",
+    "shortDescription": "Cyborgy skill: base-api-usage",
+    "longDescription": "Installs the Cyborgy workspace skill base-api-usage.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-api-usage."
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "base-skill-authoring",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-skill-authoring",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-skill-authoring",
+    "shortDescription": "Cyborgy skill: base-skill-authoring",
+    "longDescription": "Installs the Cyborgy workspace skill base-skill-authoring.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-skill-authoring."
+    ]
+  }
+}

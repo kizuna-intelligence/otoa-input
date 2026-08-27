@@ -1,0 +1,8 @@
+{
+  "name": "vllm-cold-start-and-gpu-choice",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: vllm-cold-start-and-gpu-choice",
+  "author": {
+    "name": "Cyborgy"
+  }
+}

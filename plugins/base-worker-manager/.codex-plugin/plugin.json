@@ -1,0 +1,22 @@
+{
+  "name": "base-worker-manager",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-worker-manager",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-worker-manager",
+    "shortDescription": "Cyborgy skill: base-worker-manager",
+    "longDescription": "Installs the Cyborgy workspace skill base-worker-manager.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-worker-manager."
+    ]
+  }
+}

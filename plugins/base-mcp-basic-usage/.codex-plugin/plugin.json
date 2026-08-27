@@ -1,0 +1,22 @@
+{
+  "name": "base-mcp-basic-usage",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-mcp-basic-usage",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-mcp-basic-usage",
+    "shortDescription": "Cyborgy skill: base-mcp-basic-usage",
+    "longDescription": "Installs the Cyborgy workspace skill base-mcp-basic-usage.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-mcp-basic-usage."
+    ]
+  }
+}

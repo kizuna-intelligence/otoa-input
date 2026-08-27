@@ -1,0 +1,4 @@
+interface:
+  display_name: "Detailed Design Before Handoff"
+  short_description: "Finish the detailed design, including the layer, before delegating"
+  default_prompt: "Use $design-handoff-detailed-design-required to complete the detailed design before delegating this implementation."

@@ -1,0 +1,22 @@
+{
+  "name": "base-user-review-handoff",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-user-review-handoff",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-user-review-handoff",
+    "shortDescription": "Cyborgy skill: base-user-review-handoff",
+    "longDescription": "Installs the Cyborgy workspace skill base-user-review-handoff.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-user-review-handoff."
+    ]
+  }
+}

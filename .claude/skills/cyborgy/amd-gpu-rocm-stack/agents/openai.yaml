@@ -1,0 +1,4 @@
+interface:
+  display_name: "AMD GPU ROCm Stack"
+  short_description: "Use the validated gfx1201 ROCm stack safely"
+  default_prompt: "Use $amd-gpu-rocm-stack to prepare and validate this AMD GPU workload."

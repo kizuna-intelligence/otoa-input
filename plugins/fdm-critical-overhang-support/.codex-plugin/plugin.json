@@ -1,0 +1,22 @@
+{
+  "name": "fdm-critical-overhang-support",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: fdm-critical-overhang-support",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "fdm-critical-overhang-support",
+    "shortDescription": "Cyborgy skill: fdm-critical-overhang-support",
+    "longDescription": "Installs the Cyborgy workspace skill fdm-critical-overhang-support.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use fdm-critical-overhang-support."
+    ]
+  }
+}

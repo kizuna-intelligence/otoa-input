@@ -1,0 +1,22 @@
+{
+  "name": "base-task-defaults",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-task-defaults",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-task-defaults",
+    "shortDescription": "Cyborgy skill: base-task-defaults",
+    "longDescription": "Installs the Cyborgy workspace skill base-task-defaults.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-task-defaults."
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "cyborgy-sql-asset-registry",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: cyborgy-sql-asset-registry",
+  "author": {
+    "name": "Cyborgy"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "base-agent-profile-registration",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-agent-profile-registration",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-agent-profile-registration",
+    "shortDescription": "Cyborgy skill: base-agent-profile-registration",
+    "longDescription": "Installs the Cyborgy workspace skill base-agent-profile-registration.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-agent-profile-registration."
+    ]
+  }
+}

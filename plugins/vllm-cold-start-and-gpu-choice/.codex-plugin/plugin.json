@@ -1,0 +1,22 @@
+{
+  "name": "vllm-cold-start-and-gpu-choice",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: vllm-cold-start-and-gpu-choice",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "vllm-cold-start-and-gpu-choice",
+    "shortDescription": "Cyborgy skill: vllm-cold-start-and-gpu-choice",
+    "longDescription": "Installs the Cyborgy workspace skill vllm-cold-start-and-gpu-choice.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use vllm-cold-start-and-gpu-choice."
+    ]
+  }
+}

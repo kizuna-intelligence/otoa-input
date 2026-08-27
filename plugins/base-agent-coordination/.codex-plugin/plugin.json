@@ -1,0 +1,22 @@
+{
+  "name": "base-agent-coordination",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-agent-coordination",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-agent-coordination",
+    "shortDescription": "Cyborgy skill: base-agent-coordination",
+    "longDescription": "Installs the Cyborgy workspace skill base-agent-coordination.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-agent-coordination."
+    ]
+  }
+}

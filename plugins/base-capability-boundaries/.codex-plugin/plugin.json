@@ -1,0 +1,22 @@
+{
+  "name": "base-capability-boundaries",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-capability-boundaries",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-capability-boundaries",
+    "shortDescription": "Cyborgy skill: base-capability-boundaries",
+    "longDescription": "Installs the Cyborgy workspace skill base-capability-boundaries.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-capability-boundaries."
+    ]
+  }
+}

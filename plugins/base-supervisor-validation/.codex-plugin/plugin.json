@@ -1,0 +1,22 @@
+{
+  "name": "base-supervisor-validation",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-supervisor-validation",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-supervisor-validation",
+    "shortDescription": "Cyborgy skill: base-supervisor-validation",
+    "longDescription": "Installs the Cyborgy workspace skill base-supervisor-validation.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-supervisor-validation."
+    ]
+  }
+}

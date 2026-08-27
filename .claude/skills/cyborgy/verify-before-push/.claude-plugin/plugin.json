@@ -1,0 +1,8 @@
+{
+  "name": "verify-before-push",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: verify-before-push",
+  "author": {
+    "name": "Cyborgy"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "kizuna-wasabi-data",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: kizuna-wasabi-data",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "kizuna-wasabi-data",
+    "shortDescription": "Cyborgy skill: kizuna-wasabi-data",
+    "longDescription": "Installs the Cyborgy workspace skill kizuna-wasabi-data.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use kizuna-wasabi-data."
+    ]
+  }
+}

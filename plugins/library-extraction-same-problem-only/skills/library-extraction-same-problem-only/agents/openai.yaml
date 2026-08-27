@@ -1,0 +1,4 @@
+interface:
+  display_name: "Library Only For The Same Problem"
+  short_description: "Decide the layer first; extract only when the same problem takes the same solution"
+  default_prompt: "Use $library-extraction-same-problem-only before commonising code or adding a shared module."

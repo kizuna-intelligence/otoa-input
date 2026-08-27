@@ -1,0 +1,22 @@
+{
+  "name": "base-session-history",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-session-history",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-session-history",
+    "shortDescription": "Cyborgy skill: base-session-history",
+    "longDescription": "Installs the Cyborgy workspace skill base-session-history.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-session-history."
+    ]
+  }
+}

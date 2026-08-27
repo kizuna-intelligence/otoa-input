@@ -1,0 +1,22 @@
+{
+  "name": "base-work-completion",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-work-completion",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-work-completion",
+    "shortDescription": "Cyborgy skill: base-work-completion",
+    "longDescription": "Installs the Cyborgy workspace skill base-work-completion.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-work-completion."
+    ]
+  }
+}

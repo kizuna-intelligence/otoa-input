@@ -1,0 +1,4 @@
+interface:
+  display_name: "FDM Critical Overhang Support"
+  short_description: "Require verified support under critical FDM overhangs"
+  default_prompt: "Use $fdm-critical-overhang-support to validate support contact before starting this FDM print."

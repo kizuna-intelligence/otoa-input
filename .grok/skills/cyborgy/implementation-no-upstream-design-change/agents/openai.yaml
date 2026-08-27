@@ -1,0 +1,4 @@
+interface:
+  display_name: "No Upstream Design Changes"
+  short_description: "Request design changes instead of making them; keep the layers intact"
+  default_prompt: "Use $implementation-no-upstream-design-change before deviating from the design you were given."

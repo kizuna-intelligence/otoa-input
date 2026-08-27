@@ -1,0 +1,22 @@
+{
+  "name": "long-task-notification-resume",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: long-task-notification-resume",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "long-task-notification-resume",
+    "shortDescription": "Cyborgy skill: long-task-notification-resume",
+    "longDescription": "Installs the Cyborgy workspace skill long-task-notification-resume.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use long-task-notification-resume."
+    ]
+  }
+}

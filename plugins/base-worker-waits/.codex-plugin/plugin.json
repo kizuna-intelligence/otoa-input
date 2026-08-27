@@ -1,0 +1,22 @@
+{
+  "name": "base-worker-waits",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-worker-waits",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-worker-waits",
+    "shortDescription": "Cyborgy skill: base-worker-waits",
+    "longDescription": "Installs the Cyborgy workspace skill base-worker-waits.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-worker-waits."
+    ]
+  }
+}

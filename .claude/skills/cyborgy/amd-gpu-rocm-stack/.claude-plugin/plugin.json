@@ -1,0 +1,8 @@
+{
+  "name": "amd-gpu-rocm-stack",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: amd-gpu-rocm-stack",
+  "author": {
+    "name": "Cyborgy"
+  }
+}

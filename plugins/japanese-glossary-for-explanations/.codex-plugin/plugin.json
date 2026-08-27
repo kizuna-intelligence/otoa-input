@@ -1,0 +1,22 @@
+{
+  "name": "japanese-glossary-for-explanations",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: japanese-glossary-for-explanations",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "japanese-glossary-for-explanations",
+    "shortDescription": "Cyborgy skill: japanese-glossary-for-explanations",
+    "longDescription": "Installs the Cyborgy workspace skill japanese-glossary-for-explanations.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use japanese-glossary-for-explanations."
+    ]
+  }
+}

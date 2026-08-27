@@ -1,0 +1,7 @@
+---
+description: Cyborgy workspace skills
+alwaysApply: true
+---
+
+Cyborgy workspace skills are installed under `.cursor/skills/cyborgy/`.
+When a task matches an installed skill, read that skill's `SKILL.md` before acting.

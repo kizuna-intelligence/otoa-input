@@ -1,0 +1,22 @@
+{
+  "name": "external-surface-hides-internals",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: external-surface-hides-internals",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "external-surface-hides-internals",
+    "shortDescription": "Cyborgy skill: external-surface-hides-internals",
+    "longDescription": "Installs the Cyborgy workspace skill external-surface-hides-internals.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use external-surface-hides-internals."
+    ]
+  }
+}

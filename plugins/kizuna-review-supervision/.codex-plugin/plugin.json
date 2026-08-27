@@ -1,0 +1,22 @@
+{
+  "name": "kizuna-review-supervision",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: kizuna-review-supervision",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "kizuna-review-supervision",
+    "shortDescription": "Cyborgy skill: kizuna-review-supervision",
+    "longDescription": "Installs the Cyborgy workspace skill kizuna-review-supervision.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use kizuna-review-supervision."
+    ]
+  }
+}

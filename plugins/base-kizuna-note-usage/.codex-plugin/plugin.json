@@ -1,0 +1,22 @@
+{
+  "name": "base-kizuna-note-usage",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-kizuna-note-usage",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-kizuna-note-usage",
+    "shortDescription": "Cyborgy skill: base-kizuna-note-usage",
+    "longDescription": "Installs the Cyborgy workspace skill base-kizuna-note-usage.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-kizuna-note-usage."
+    ]
+  }
+}

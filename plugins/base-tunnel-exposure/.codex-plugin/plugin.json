@@ -1,0 +1,22 @@
+{
+  "name": "base-tunnel-exposure",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-tunnel-exposure",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-tunnel-exposure",
+    "shortDescription": "Cyborgy skill: base-tunnel-exposure",
+    "longDescription": "Installs the Cyborgy workspace skill base-tunnel-exposure.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-tunnel-exposure."
+    ]
+  }
+}

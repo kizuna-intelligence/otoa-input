@@ -1,0 +1,22 @@
+{
+  "name": "kizuna-review-stronger-model-required",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: kizuna-review-stronger-model-required",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "kizuna-review-stronger-model-required",
+    "shortDescription": "Cyborgy skill: kizuna-review-stronger-model-required",
+    "longDescription": "Installs the Cyborgy workspace skill kizuna-review-stronger-model-required.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use kizuna-review-stronger-model-required."
+    ]
+  }
+}

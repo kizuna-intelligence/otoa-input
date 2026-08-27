@@ -57,6 +57,13 @@ pub struct ExtraSettingsPage {
     pub apply: Arc<dyn Fn(&mut Settings) + Send + Sync>,
 }
 
+/// 設定画面の面。[`SettingsExtension::page`] で名指しする。
+///
+/// **公開しているのは、配布側がこの名前を書くからである。** 型が
+/// 非公開のままだと `SettingsExtension` を組み立てられない
+/// （実際に配布側で組もうとして詰まった）。
+pub use wiring::SettingsPage;
+
 /// 設定画面の行に付ける名前。**配布側から名指しで落とすためにある。**
 ///
 /// 公開版の面をそのまま使いたいが、配布によっては意味を持たない行がある。
@@ -106,8 +113,18 @@ pub struct SettingsExtension {
     pub page: wiring::SettingsPage,
     /// 公開版が描く行のうち、落とすもの。
     pub hidden_rows: &'static [SettingsRow],
-    /// 面の末尾に足す中身。`None` なら足さない。
-    pub build: Option<
+    /// 枠の中に、行として足す中身。`None` なら足さない。
+    ///
+    /// 公開版の行と並ぶので、[`ui::settings_view::setting_row`] で作ること。
+    pub build_rows: Option<
+        Arc<dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>) -> floem::AnyView + Send + Sync>,
+    >,
+    /// 枠の**外**、面の末尾に足す中身。`None` なら足さない。
+    ///
+    /// 見出しを持つ塊や、行に収まらない大きいものはこちら。
+    /// **行として枠に入れると、枠からはみ出して窓に収まらない**
+    /// （実際にそうなった）。
+    pub build_sections: Option<
         Arc<dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>) -> floem::AnyView + Send + Sync>,
     >,
     /// 保存ボタンが押されたときに呼ばれる。**保存ボタンは 1 つにする**
@@ -118,7 +135,7 @@ pub struct SettingsExtension {
 impl SettingsExtension {
     /// 行を落とすだけの指定。
     pub fn hiding(page: wiring::SettingsPage, hidden_rows: &'static [SettingsRow]) -> Self {
-        Self { page, hidden_rows, build: None, apply: None }
+        Self { page, hidden_rows, build_rows: None, build_sections: None, apply: None }
     }
 }
 

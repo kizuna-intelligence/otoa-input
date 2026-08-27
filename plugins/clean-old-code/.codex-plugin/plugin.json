@@ -1,0 +1,22 @@
+{
+  "name": "clean-old-code",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: clean-old-code",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "clean-old-code",
+    "shortDescription": "Cyborgy skill: clean-old-code",
+    "longDescription": "Installs the Cyborgy workspace skill clean-old-code.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use clean-old-code."
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "simple-general-purpose-design",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: simple-general-purpose-design",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "simple-general-purpose-design",
+    "shortDescription": "Cyborgy skill: simple-general-purpose-design",
+    "longDescription": "Installs the Cyborgy workspace skill simple-general-purpose-design.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use simple-general-purpose-design."
+    ]
+  }
+}

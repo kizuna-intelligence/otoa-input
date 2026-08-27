@@ -1,0 +1,22 @@
+{
+  "name": "base-session-log-skill-maintenance",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-session-log-skill-maintenance",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-session-log-skill-maintenance",
+    "shortDescription": "Cyborgy skill: base-session-log-skill-maintenance",
+    "longDescription": "Installs the Cyborgy workspace skill base-session-log-skill-maintenance.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-session-log-skill-maintenance."
+    ]
+  }
+}

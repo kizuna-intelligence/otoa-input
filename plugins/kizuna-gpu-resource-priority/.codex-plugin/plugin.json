@@ -1,0 +1,22 @@
+{
+  "name": "kizuna-gpu-resource-priority",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: kizuna-gpu-resource-priority",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "kizuna-gpu-resource-priority",
+    "shortDescription": "Cyborgy skill: kizuna-gpu-resource-priority",
+    "longDescription": "Installs the Cyborgy workspace skill kizuna-gpu-resource-priority.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use kizuna-gpu-resource-priority."
+    ]
+  }
+}

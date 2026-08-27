@@ -1,0 +1,22 @@
+{
+  "name": "cyborgy-ml-experiment-tracking",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: cyborgy-ml-experiment-tracking",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "cyborgy-ml-experiment-tracking",
+    "shortDescription": "Cyborgy skill: cyborgy-ml-experiment-tracking",
+    "longDescription": "Installs the Cyborgy workspace skill cyborgy-ml-experiment-tracking.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use cyborgy-ml-experiment-tracking."
+    ]
+  }
+}

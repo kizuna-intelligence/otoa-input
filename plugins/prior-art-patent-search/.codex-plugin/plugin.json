@@ -1,0 +1,22 @@
+{
+  "name": "prior-art-patent-search",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: prior-art-patent-search",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "prior-art-patent-search",
+    "shortDescription": "Cyborgy skill: prior-art-patent-search",
+    "longDescription": "Installs the Cyborgy workspace skill prior-art-patent-search.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use prior-art-patent-search."
+    ]
+  }
+}

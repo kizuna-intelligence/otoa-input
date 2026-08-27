@@ -542,19 +542,17 @@ fn page_view(
             &hidden_rows(page, &extensions),
         )
         .into_any(),
-        SettingsPage::Recognition => recognition_page(
-            form,
-            &hidden_rows(page, &extensions),
-            with_extension(
-                Vec::new(),
-                page,
-                &extensions,
-                &settings,
-                state,
-                &commands,
-            ),
-        )
-        .into_any(),
+        SettingsPage::Recognition => {
+            let (extra_rows, extra_sections) =
+                extension_views(page, &extensions, &settings, state, &commands);
+            recognition_page(
+                form,
+                &hidden_rows(page, &extensions),
+                extra_rows,
+                extra_sections,
+            )
+            .into_any()
+        }
         SettingsPage::Display => display_page(form).into_any(),
         SettingsPage::Extra => match extra {
             Some(entry) => (entry.build)(settings.clone(), state, commands.clone()),
@@ -672,7 +670,12 @@ fn microphone_page(
     )
 }
 
-fn recognition_page(form: FormState, hidden: &[SettingsRow], extra: Vec<AnyView>) -> impl IntoView {
+fn recognition_page(
+    form: FormState,
+    hidden: &[SettingsRow],
+    extra_rows: Vec<AnyView>,
+    extra_sections: Vec<AnyView>,
+) -> impl IntoView {
     let mut rows = keep_visible(
         vec![
             (
@@ -721,8 +724,17 @@ fn recognition_page(form: FormState, hidden: &[SettingsRow], extra: Vec<AnyView>
         ],
         hidden,
     );
-    rows.extend(extra);
-    section_page("認識", "音声を文字にする方法と、発話の区切りを調整します。", rows)
+    rows.extend(extra_rows);
+    v_stack((
+        section_page("認識", "音声を文字にする方法と、発話の区切りを調整します。", rows),
+        v_stack_from_iter(extra_sections).style(|style| {
+            style
+                .width_full()
+                .min_width(0.0)
+                .gap(theme::space::MD)
+        }),
+    ))
+    .style(|style| style.width_full().min_width(0.0).gap(theme::space::MD))
 }
 
 fn engine_setting_row(selected: RwSignal<AsrEngineChoice>) -> impl IntoView {
@@ -1228,21 +1240,25 @@ fn keep_visible<T>(rows: Vec<(SettingsRow, T)>, hidden: &[SettingsRow]) -> Vec<T
         .collect()
 }
 
-/// 面の末尾に、配布側が足す中身を積む。
-fn with_extension(
-    mut rows: Vec<AnyView>,
+/// 配布側が足す中身を集める。`rows` は枠の中、`sections` は枠の外。
+fn extension_views(
     page: SettingsPage,
     extensions: &[SettingsExtension],
     settings: &Settings,
     state: UiState,
     commands: &Sender<ControllerCommand>,
-) -> Vec<AnyView> {
+) -> (Vec<AnyView>, Vec<AnyView>) {
+    let mut rows = Vec::new();
+    let mut sections = Vec::new();
     for extension in extensions.iter().filter(|item| item.page == page) {
-        if let Some(build) = extension.build.as_ref() {
+        if let Some(build) = extension.build_rows.as_ref() {
             rows.push(build(settings.clone(), state, commands.clone()));
         }
+        if let Some(build) = extension.build_sections.as_ref() {
+            sections.push(build(settings.clone(), state, commands.clone()));
+        }
     }
-    rows
+    (rows, sections)
 }
 
 /// この面で落とす行を集める。

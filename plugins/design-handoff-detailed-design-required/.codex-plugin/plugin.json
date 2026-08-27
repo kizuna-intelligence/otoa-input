@@ -1,0 +1,22 @@
+{
+  "name": "design-handoff-detailed-design-required",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: design-handoff-detailed-design-required",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "design-handoff-detailed-design-required",
+    "shortDescription": "Cyborgy skill: design-handoff-detailed-design-required",
+    "longDescription": "Installs the Cyborgy workspace skill design-handoff-detailed-design-required.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use design-handoff-detailed-design-required."
+    ]
+  }
+}

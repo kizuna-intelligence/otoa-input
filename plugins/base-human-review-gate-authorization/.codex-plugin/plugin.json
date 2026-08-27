@@ -1,0 +1,22 @@
+{
+  "name": "base-human-review-gate-authorization",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-human-review-gate-authorization",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-human-review-gate-authorization",
+    "shortDescription": "Cyborgy skill: base-human-review-gate-authorization",
+    "longDescription": "Installs the Cyborgy workspace skill base-human-review-gate-authorization.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-human-review-gate-authorization."
+    ]
+  }
+}

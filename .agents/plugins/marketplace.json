@@ -1,0 +1,764 @@
+{
+  "name": "cyborgy",
+  "interface": {
+    "displayName": "Cyborgy"
+  },
+  "plugins": [
+    {
+      "name": "base-defaults",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-defaults"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-agent-selection",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-agent-selection"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-task-defaults",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-task-defaults"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-user-review-handoff",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-user-review-handoff"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-user-action-task-handoff",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-user-action-task-handoff"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-human-review-gate-authorization",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-human-review-gate-authorization"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-role-hierarchy",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-role-hierarchy"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-session-history",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-session-history"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-session-rules",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-session-rules"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-worker-waits",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-worker-waits"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-work-completion",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-work-completion"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-agent-coordination",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-agent-coordination"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-graphiti-memory",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-graphiti-memory"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-kizuna-note-usage",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-kizuna-note-usage"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-api-usage",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-api-usage"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-mcp-basic-usage",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-mcp-basic-usage"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-session-log-skill-maintenance",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-session-log-skill-maintenance"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-agent-profile-registration",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-agent-profile-registration"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-skill-authoring",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-skill-authoring"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-development-defaults",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-development-defaults"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-integration-testing",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-integration-testing"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-outside-grid-worker-operations",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-outside-grid-worker-operations"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-capability-boundaries",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-capability-boundaries"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-browser-self-testing",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-browser-self-testing"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-git-release-safety",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-git-release-safety"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-tunnel-exposure",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-tunnel-exposure"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-pr-review-requester",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-pr-review-requester"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-browser-video-ui-testing",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-browser-video-ui-testing"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-worker-manager",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-worker-manager"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-agent-cleanup",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-agent-cleanup"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-github-pr-reviewer",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-github-pr-reviewer"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "base-supervisor-validation",
+      "source": {
+        "source": "local",
+        "path": "./plugins/base-supervisor-validation"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "kizuna-printer-defaults",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kizuna-printer-defaults"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "kizuna-review-supervision",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kizuna-review-supervision"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "algorithm-supervisor",
+      "source": {
+        "source": "local",
+        "path": "./plugins/algorithm-supervisor"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "clean-old-code",
+      "source": {
+        "source": "local",
+        "path": "./plugins/clean-old-code"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "user-supported-writer",
+      "source": {
+        "source": "local",
+        "path": "./plugins/user-supported-writer"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "algorithm-review-evaluation",
+      "source": {
+        "source": "local",
+        "path": "./plugins/algorithm-review-evaluation"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "kizuna-external-agent-model-gating",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kizuna-external-agent-model-gating"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "amd-gpu-rocm-stack",
+      "source": {
+        "source": "local",
+        "path": "./plugins/amd-gpu-rocm-stack"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "kizuna-gpu-resource-priority",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kizuna-gpu-resource-priority"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "prior-art-patent-search",
+      "source": {
+        "source": "local",
+        "path": "./plugins/prior-art-patent-search"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "cyborgy-ml-experiment-tracking",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cyborgy-ml-experiment-tracking"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "cyborgy-sql-reference-library",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cyborgy-sql-reference-library"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "cyborgy-sql-asset-registry",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cyborgy-sql-asset-registry"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "kizuna-review-stronger-model-required",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kizuna-review-stronger-model-required"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "design-handoff-detailed-design-required",
+      "source": {
+        "source": "local",
+        "path": "./plugins/design-handoff-detailed-design-required"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "implementation-no-upstream-design-change",
+      "source": {
+        "source": "local",
+        "path": "./plugins/implementation-no-upstream-design-change"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "document-math-typesetting-quality",
+      "source": {
+        "source": "local",
+        "path": "./plugins/document-math-typesetting-quality"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "library-extraction-same-problem-only",
+      "source": {
+        "source": "local",
+        "path": "./plugins/library-extraction-same-problem-only"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "simple-general-purpose-design",
+      "source": {
+        "source": "local",
+        "path": "./plugins/simple-general-purpose-design"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "fdm-critical-overhang-support",
+      "source": {
+        "source": "local",
+        "path": "./plugins/fdm-critical-overhang-support"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "paper-survey-commentary-structure",
+      "source": {
+        "source": "local",
+        "path": "./plugins/paper-survey-commentary-structure"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "japanese-glossary-for-explanations",
+      "source": {
+        "source": "local",
+        "path": "./plugins/japanese-glossary-for-explanations"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "software-patent-specification",
+      "source": {
+        "source": "local",
+        "path": "./plugins/software-patent-specification"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "git-commit-and-pr-rules",
+      "source": {
+        "source": "local",
+        "path": "./plugins/git-commit-and-pr-rules"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "cyborgy-skill-binding",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cyborgy-skill-binding"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "verify-before-push",
+      "source": {
+        "source": "local",
+        "path": "./plugins/verify-before-push"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "long-task-notification-resume",
+      "source": {
+        "source": "local",
+        "path": "./plugins/long-task-notification-resume"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "kizuna-wasabi-data",
+      "source": {
+        "source": "local",
+        "path": "./plugins/kizuna-wasabi-data"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "cyborgy-api-without-mcp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cyborgy-api-without-mcp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "vllm-cold-start-and-gpu-choice",
+      "source": {
+        "source": "local",
+        "path": "./plugins/vllm-cold-start-and-gpu-choice"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "external-surface-hides-internals",
+      "source": {
+        "source": "local",
+        "path": "./plugins/external-surface-hides-internals"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

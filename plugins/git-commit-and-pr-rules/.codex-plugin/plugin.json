@@ -1,0 +1,22 @@
+{
+  "name": "git-commit-and-pr-rules",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: git-commit-and-pr-rules",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "git-commit-and-pr-rules",
+    "shortDescription": "Cyborgy skill: git-commit-and-pr-rules",
+    "longDescription": "Installs the Cyborgy workspace skill git-commit-and-pr-rules.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use git-commit-and-pr-rules."
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "software-patent-specification",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: software-patent-specification",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "software-patent-specification",
+    "shortDescription": "Cyborgy skill: software-patent-specification",
+    "longDescription": "Installs the Cyborgy workspace skill software-patent-specification.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use software-patent-specification."
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "paper-survey-commentary-structure",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: paper-survey-commentary-structure",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "paper-survey-commentary-structure",
+    "shortDescription": "Cyborgy skill: paper-survey-commentary-structure",
+    "longDescription": "Installs the Cyborgy workspace skill paper-survey-commentary-structure.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use paper-survey-commentary-structure."
+    ]
+  }
+}

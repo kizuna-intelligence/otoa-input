@@ -1,0 +1,4 @@
+interface:
+  display_name: "Clean Old Code"
+  short_description: "Inventory and safely remove superseded code"
+  default_prompt: "Use $clean-old-code to inventory superseded implementations and propose a safe cleanup plan."

@@ -1,0 +1,22 @@
+{
+  "name": "implementation-no-upstream-design-change",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: implementation-no-upstream-design-change",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "implementation-no-upstream-design-change",
+    "shortDescription": "Cyborgy skill: implementation-no-upstream-design-change",
+    "longDescription": "Installs the Cyborgy workspace skill implementation-no-upstream-design-change.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use implementation-no-upstream-design-change."
+    ]
+  }
+}

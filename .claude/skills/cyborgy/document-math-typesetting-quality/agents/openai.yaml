@@ -1,0 +1,4 @@
+interface:
+  display_name: "TeX-Quality Math in Documents"
+  short_description: "Typeset formulas at TeX quality, never as plain-text pseudo-math"
+  default_prompt: "Use $document-math-typesetting-quality when a document contains mathematical notation."

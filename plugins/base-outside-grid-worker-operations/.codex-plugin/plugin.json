@@ -1,0 +1,22 @@
+{
+  "name": "base-outside-grid-worker-operations",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-outside-grid-worker-operations",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-outside-grid-worker-operations",
+    "shortDescription": "Cyborgy skill: base-outside-grid-worker-operations",
+    "longDescription": "Installs the Cyborgy workspace skill base-outside-grid-worker-operations.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-outside-grid-worker-operations."
+    ]
+  }
+}

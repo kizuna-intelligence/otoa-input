@@ -1,0 +1,4 @@
+interface:
+  display_name: "ユーザーサポーティードライター"
+  short_description: "ユーザーの考えを加筆せず忠実に整えて文書化するスキル"
+  default_prompt: "Use $user-supported-writer to turn my ideas into a document without adding anything I did not say."

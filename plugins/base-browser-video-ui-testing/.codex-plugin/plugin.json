@@ -1,0 +1,22 @@
+{
+  "name": "base-browser-video-ui-testing",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-browser-video-ui-testing",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-browser-video-ui-testing",
+    "shortDescription": "Cyborgy skill: base-browser-video-ui-testing",
+    "longDescription": "Installs the Cyborgy workspace skill base-browser-video-ui-testing.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-browser-video-ui-testing."
+    ]
+  }
+}

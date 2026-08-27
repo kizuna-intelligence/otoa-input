@@ -1,0 +1,8 @@
+{
+  "name": "base-github-pr-reviewer",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-github-pr-reviewer",
+  "author": {
+    "name": "Cyborgy"
+  }
+}

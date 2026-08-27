@@ -1,0 +1,22 @@
+{
+  "name": "cyborgy-sql-reference-library",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: cyborgy-sql-reference-library",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "cyborgy-sql-reference-library",
+    "shortDescription": "Cyborgy skill: cyborgy-sql-reference-library",
+    "longDescription": "Installs the Cyborgy workspace skill cyborgy-sql-reference-library.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use cyborgy-sql-reference-library."
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "base-agent-cleanup",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-agent-cleanup",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-agent-cleanup",
+    "shortDescription": "Cyborgy skill: base-agent-cleanup",
+    "longDescription": "Installs the Cyborgy workspace skill base-agent-cleanup.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-agent-cleanup."
+    ]
+  }
+}

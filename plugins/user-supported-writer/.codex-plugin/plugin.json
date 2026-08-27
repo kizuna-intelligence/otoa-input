@@ -1,0 +1,22 @@
+{
+  "name": "user-supported-writer",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: user-supported-writer",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "user-supported-writer",
+    "shortDescription": "Cyborgy skill: user-supported-writer",
+    "longDescription": "Installs the Cyborgy workspace skill user-supported-writer.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use user-supported-writer."
+    ]
+  }
+}

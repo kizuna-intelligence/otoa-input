@@ -1,0 +1,22 @@
+{
+  "name": "base-github-pr-reviewer",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-github-pr-reviewer",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-github-pr-reviewer",
+    "shortDescription": "Cyborgy skill: base-github-pr-reviewer",
+    "longDescription": "Installs the Cyborgy workspace skill base-github-pr-reviewer.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-github-pr-reviewer."
+    ]
+  }
+}

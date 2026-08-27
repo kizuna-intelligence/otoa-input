@@ -1,0 +1,22 @@
+{
+  "name": "kizuna-external-agent-model-gating",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: kizuna-external-agent-model-gating",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "kizuna-external-agent-model-gating",
+    "shortDescription": "Cyborgy skill: kizuna-external-agent-model-gating",
+    "longDescription": "Installs the Cyborgy workspace skill kizuna-external-agent-model-gating.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use kizuna-external-agent-model-gating."
+    ]
+  }
+}

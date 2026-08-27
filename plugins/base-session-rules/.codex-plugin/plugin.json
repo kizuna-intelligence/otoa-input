@@ -1,0 +1,22 @@
+{
+  "name": "base-session-rules",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-session-rules",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-session-rules",
+    "shortDescription": "Cyborgy skill: base-session-rules",
+    "longDescription": "Installs the Cyborgy workspace skill base-session-rules.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-session-rules."
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "algorithm-supervisor",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: algorithm-supervisor",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "algorithm-supervisor",
+    "shortDescription": "Cyborgy skill: algorithm-supervisor",
+    "longDescription": "Installs the Cyborgy workspace skill algorithm-supervisor.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use algorithm-supervisor."
+    ]
+  }
+}

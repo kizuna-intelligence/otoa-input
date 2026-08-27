@@ -1,0 +1,22 @@
+{
+  "name": "base-browser-self-testing",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: base-browser-self-testing",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "base-browser-self-testing",
+    "shortDescription": "Cyborgy skill: base-browser-self-testing",
+    "longDescription": "Installs the Cyborgy workspace skill base-browser-self-testing.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use base-browser-self-testing."
+    ]
+  }
+}

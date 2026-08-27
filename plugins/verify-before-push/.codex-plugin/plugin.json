@@ -1,0 +1,22 @@
+{
+  "name": "verify-before-push",
+  "version": "0.1.0",
+  "description": "Cyborgy skill: verify-before-push",
+  "author": {
+    "name": "Cyborgy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "verify-before-push",
+    "shortDescription": "Cyborgy skill: verify-before-push",
+    "longDescription": "Installs the Cyborgy workspace skill verify-before-push.",
+    "developerName": "Cyborgy",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use verify-before-push."
+    ]
+  }
+}
