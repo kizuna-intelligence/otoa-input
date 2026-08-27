@@ -57,6 +57,71 @@ pub struct ExtraSettingsPage {
     pub apply: Arc<dyn Fn(&mut Settings) + Send + Sync>,
 }
 
+/// 設定画面の行に付ける名前。**配布側から名指しで落とすためにある。**
+///
+/// 公開版の面をそのまま使いたいが、配布によっては意味を持たない行がある。
+/// たとえば接続先がサーバー側で決まる配布では「認識エンジン」を選ばせても
+/// 効かない。**選べるのに効かない項目は、無いほうがよい。**
+///
+/// 値を消したり並べ替えたりしないこと。配布側がこの名前を書いている。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum SettingsRow {
+    /// 一般 — 起動時に待受を始める
+    StartListening,
+    /// 一般 — 確定後に自動で貼り付ける
+    AutoPaste,
+    /// 一般 — 言語
+    Language,
+    /// 一般 — 発話が無いときに接続を閉じるまで
+    IdleClose,
+    /// マイク — 使うマイク
+    Microphone,
+    /// マイク — 入力ゲイン
+    InputGain,
+    /// マイク — 入力レベル
+    InputLevel,
+    /// 認識 — 認識エンジン
+    AsrEngine,
+    /// 認識 — 発話の区切り（無音）
+    VadMinSilence,
+    /// 認識 — 発話とみなす最小の長さ
+    VadMinSpeech,
+    /// 認識 — 拾いやすさ（VAD しきい値）
+    VadThreshold,
+    /// 認識 — 話し始めをさかのぼる長さ
+    Preroll,
+}
+
+/// 公開版の面に手を入れる、配布ごとの指定。
+///
+/// [`ExtraSettingsPage`] が面を 1 つ**足す**のに対し、こちらは公開版が既に
+/// 持っている面を**受け継いで作り替える**。面が増えないので、
+/// 「声」と「認識」のように同じ話が 2 か所に分かれることがない。
+///
+/// 落とすだけ・足すだけでもよい。両方指定してもよい。
+#[derive(Clone)]
+pub struct SettingsExtension {
+    /// どの面に手を入れるか。
+    pub page: wiring::SettingsPage,
+    /// 公開版が描く行のうち、落とすもの。
+    pub hidden_rows: &'static [SettingsRow],
+    /// 面の末尾に足す中身。`None` なら足さない。
+    pub build: Option<
+        Arc<dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>) -> floem::AnyView + Send + Sync>,
+    >,
+    /// 保存ボタンが押されたときに呼ばれる。**保存ボタンは 1 つにする**
+    /// 理由は [`ExtraSettingsPage::apply`] と同じ。
+    pub apply: Option<Arc<dyn Fn(&mut Settings) + Send + Sync>>,
+}
+
+impl SettingsExtension {
+    /// 行を落とすだけの指定。
+    pub fn hiding(page: wiring::SettingsPage, hidden_rows: &'static [SettingsRow]) -> Self {
+        Self { page, hidden_rows, build: None, apply: None }
+    }
+}
+
 pub type SettingsView = Arc<
     dyn Fn(Settings, ui::UiState, Sender<ControllerCommand>, WindowId) -> floem::AnyView
         + Send
@@ -81,6 +146,11 @@ pub struct Deps {
     /// 公開版の画面をそのまま使ったまま、面を 1 つ増やす。
     /// ふつうはこちらで足りる。
     pub extra_settings_page: Option<ExtraSettingsPage>,
+    /// 公開版の面を受け継いで作り替える指定。空なら公開版のまま。
+    ///
+    /// 面を 1 つ足す [`Deps::extra_settings_page`] と違い、こちらは既にある
+    /// 面の中身を差し替える。**ふつうはこちらで足りる。**
+    pub settings_extensions: Vec<SettingsExtension>,
     /// 設定画面。`None` なら公開版のものを使う。
     ///
     /// 設定画面に欄を 1 つ足すためだけに個別の差し込み口を並べると、
@@ -96,6 +166,7 @@ impl Deps {
             provider,
             settings_view: None,
             extra_settings_page: None,
+            settings_extensions: Vec::new(),
         }
     }
 }
@@ -267,6 +338,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             runtime,
             deps.settings_view,
             deps.extra_settings_page,
+            deps.settings_extensions,
         );
     }
 
@@ -295,6 +367,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             runtime,
             deps.settings_view,
             deps.extra_settings_page,
+            deps.settings_extensions,
         );
     }
 
@@ -379,6 +452,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         runtime,
         deps.settings_view,
         deps.extra_settings_page,
+        deps.settings_extensions,
     )
 }
 
