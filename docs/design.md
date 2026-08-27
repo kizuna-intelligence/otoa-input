@@ -52,6 +52,40 @@ ReazonSpeech k2-v2 は非ストリーミングで、一度に扱えるのは約 
 `account` / `readiness` だけで動く。`prepare()` が `None` を返す実装では
 UI 自体が出ない。
 
+## 設定画面は「足す」より「受け継ぐ」
+
+配布ごとの欄を出す口は 2 つある。
+
+- `extra_settings_page` … 面を 1 つ**足す**。レールに項目が増える
+- `settings_extensions` … 公開版の面を**受け継いで作り替える**
+
+**ふつうは後者を使う。** 面を足すと、同じ話が 2 か所に分かれる。たとえば
+「文字にする方法」を別の面に出すと、公開版の「認識」にも似た欄が並び、
+利用者はどちらを触ればよいのか分からない。
+
+`SettingsExtension` は、面を名指しして
+
+- `hidden_rows` … 公開版が描く行のうち落とすもの（`SettingsRow` で名指し）
+- `build` … その面の末尾に足す中身
+
+を指定する。**選べるのに効かない項目を出さないため**に落とす口がある。
+接続先がサーバー側で決まる配布では「認識エンジン」を選ばせても効かない。
+
+```rust
+SettingsExtension {
+    page: SettingsPage::Recognition,
+    hidden_rows: &[SettingsRow::AsrEngine],
+    build: Some(Arc::new(|settings, state, commands| { ... })),
+    apply: Some(Arc::new(|next| { ... })),
+}
+```
+
+`SettingsRow` の値は**消したり並べ替えたりしない**。配布側がこの名前を
+書いている。行を増やすときは末尾に足す。
+
+保存ボタンは 1 つのままである。面が自分の保存ボタンを持つと、公開版の保存が
+画面を開いた時点の設定から組み直すので、足したぶんが消える（実際にそうなった）。
+
 ## 配布物はバイナリだけで動く
 
 ONNX Runtime は静的リンクし、Silero VAD モデルはバイナリへ埋め込んである。
