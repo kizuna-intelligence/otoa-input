@@ -8,6 +8,9 @@ use std::{
 };
 use tungstenite::{connect, stream::MaybeTlsStream, ClientRequestBuilder, Message, WebSocket};
 
+/// WebSocket の Policy Violation close code。
+pub const POLICY_VIOLATION_CLOSE_CODE: u16 = 1008;
+
 /// client → session へ送る指示。
 pub enum AsrCommand {
     /// 生 PCM（16 kHz mono s16le のバイト列）。
@@ -33,6 +36,8 @@ pub enum AsrEvent {
     FinalizeDone,
     /// `finished: true` を受信した。この後 close される。
     Finished,
+    /// WebSocket の close frame。理由は相手が送った本文をそのまま保持する。
+    Closed { code: Option<u16>, reason: String },
     /// セッションを継続したまま利用者へ伝える通知。
     Notice { code: String, message: String },
     /// 復帰不能な失敗。この後スレッドは終了する。
@@ -178,7 +183,11 @@ fn run_session(
                     }
                 }
             }
-            Ok(Message::Close(_)) => {
+            Ok(Message::Close(frame)) => {
+                let (code, reason) = frame.map_or((None, String::new()), |frame| {
+                    (Some(u16::from(frame.code)), frame.reason.to_string())
+                });
+                let _ = events.send(AsrEvent::Closed { code, reason });
                 if !stopping {
                     send_failed(&events, AsrError::ClosedEarly);
                     failed = true;
@@ -190,11 +199,16 @@ fn run_session(
             | Ok(Message::Pong(_))
             | Ok(Message::Frame(_)) => {}
             Err(error) if is_read_timeout(&error) => {}
-            Err(error) if stopping || finished_received => {
+            Err(error) if finished_received => {
                 tracing::debug!(
                     target: "otoa_input",
                     "ASR connection closed during normal shutdown: {error}"
                 );
+                break 'session;
+            }
+            Err(error) if stopping => {
+                send_failed(&events, AsrError::Io(error.to_string()));
+                failed = true;
                 break 'session;
             }
             Err(error) => {
