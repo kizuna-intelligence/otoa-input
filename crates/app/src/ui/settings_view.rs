@@ -2,6 +2,7 @@ use super::{theme, UiState};
 use crate::controller::{ControllerCommand, LevelStatus, LoginState};
 use crate::settings::Settings;
 use crate::wiring::SettingsPage;
+use crate::{SettingsExtension, SettingsRow};
 use crossbeam_channel::Sender;
 use floem::{
     action::exec_after,
@@ -89,6 +90,7 @@ pub fn view(
     window_id: WindowId,
     initial_page: SettingsPage,
     extra: Option<crate::ExtraSettingsPage>,
+    extensions: Vec<SettingsExtension>,
 ) -> impl IntoView {
     let server_url = RwSignal::new(settings.server_url.clone());
     let language = RwSignal::new(language_label(&settings.language_hints));
@@ -187,10 +189,21 @@ pub fn view(
         }
     });
 
-    let save_message =
-        RwSignal::new("保存すると反映されます。認識エンジンは再起動後。".to_string());
+    // 認識エンジンを落とした配布では「認識エンジンは再起動後」が嘘になる。
+    // 出ていない項目の注意書きを読ませない。
+    let engine_row_visible = !hidden_rows(SettingsPage::Recognition, &extensions)
+        .contains(&SettingsRow::AsrEngine);
+    let save_message = RwSignal::new(
+        if engine_row_visible {
+            "保存すると反映されます。認識エンジンは再起動後。"
+        } else {
+            "保存すると反映されます。"
+        }
+        .to_string(),
+    );
     let save_message_error = RwSignal::new(false);
     let extra_for_save = extra.clone();
+    let extensions_for_save = extensions.clone();
     let save = {
         let commands = commands.clone();
         let original = settings.clone();
@@ -231,6 +244,12 @@ pub fn view(
             if let Some(page) = extra_for_save.as_ref() {
                 (page.apply)(&mut next);
             }
+            // 面を受け継いで足したぶんも同じ理由で拾う。**指定した順に呼ぶ。**
+            for extension in extensions_for_save.iter() {
+                if let Some(apply) = extension.apply.as_ref() {
+                    apply(&mut next);
+                }
+            }
 
             if let Err(error) = crate::settings_io::save(&next) {
                 tracing::error!("設定の保存に失敗しました: {error:#}");
@@ -246,12 +265,14 @@ pub fn view(
 
     let extra_label = extra.as_ref().map(|page| page.label);
     let extra_for_pages = extra.map(|page| std::sync::Arc::new(page));
+    let extensions_for_pages = std::sync::Arc::new(extensions);
     let rail = rail_view(page, state, extra_label);
     let pages = dyn_container(
         move || page.get(),
         move |selected_page| {
             page_view(
                 extra_for_pages.clone(),
+                extensions_for_pages.clone(),
                 selected_page,
                 form,
                 state,
@@ -502,6 +523,7 @@ fn rail_item(
 
 fn page_view(
     extra: Option<std::sync::Arc<crate::ExtraSettingsPage>>,
+    extensions: std::sync::Arc<Vec<SettingsExtension>>,
     page: SettingsPage,
     form: FormState,
     state: UiState,
@@ -510,9 +532,28 @@ fn page_view(
     smooth_level: RwSignal<f64>,
 ) -> AnyView {
     match page {
-        SettingsPage::General => general_page(form).into_any(),
-        SettingsPage::Microphone => microphone_page(form, state, smooth_level).into_any(),
-        SettingsPage::Recognition => recognition_page(form).into_any(),
+        SettingsPage::General => {
+            general_page(form, &hidden_rows(page, &extensions)).into_any()
+        }
+        SettingsPage::Microphone => microphone_page(
+            form,
+            state,
+            smooth_level,
+            &hidden_rows(page, &extensions),
+        )
+        .into_any(),
+        SettingsPage::Recognition => {
+            let (extra_rows, extra_sections, sections_first) =
+                extension_views(page, &extensions, &settings, state, &commands);
+            recognition_page(
+                form,
+                &hidden_rows(page, &extensions),
+                extra_rows,
+                extra_sections,
+                sections_first,
+            )
+            .into_any()
+        }
         SettingsPage::Display => display_page(form).into_any(),
         SettingsPage::Extra => match extra {
             Some(entry) => (entry.build)(settings.clone(), state, commands.clone()),
@@ -523,116 +564,185 @@ fn page_view(
     }
 }
 
-fn general_page(form: FormState) -> impl IntoView {
+fn general_page(form: FormState, hidden: &[SettingsRow]) -> impl IntoView {
     section_page(
         "一般",
         "待受と貼り付けのふるまい。",
-        vec![
-            setting_row(
-                "起動時に待受を始める",
-                caption("起動したらすぐ話せる状態にします"),
-                toggle_control(form.listening_enabled, form.reduce_motion),
-            )
-            .into_any(),
-            setting_row(
-                "確定後に自動で貼り付ける",
-                caption("オフのときはクリップボードに置くだけにします"),
-                toggle_control(form.auto_paste, form.reduce_motion),
-            )
-            .into_any(),
-            setting_row(
-                "言語",
-                caption("同梱サーバーは日本語だけです。接続先によっては効きます"),
-                Dropdown::new_rw(
-                    form.language,
-                    ["日本語".to_string(), "英語".to_string(), "自動".to_string()],
-                )
-                .style(dropdown_style),
-            )
-            .into_any(),
-            setting_row(
-                "発話が無いときに接続を閉じるまで",
-                caption(""),
-                numeric_field::<u32>(form.idle_close_sec, "15", "秒"),
-            )
-            .into_any(),
-        ],
+        keep_visible(
+            vec![
+                (
+                    SettingsRow::StartListening,
+                    setting_row(
+                        "起動時に待受を始める",
+                        caption("起動したらすぐ話せる状態にします"),
+                        toggle_control(form.listening_enabled, form.reduce_motion),
+                    )
+                    .into_any(),
+                ),
+                (
+                    SettingsRow::AutoPaste,
+                    setting_row(
+                        "確定後に自動で貼り付ける",
+                        caption("オフのときはクリップボードに置くだけにします"),
+                        toggle_control(form.auto_paste, form.reduce_motion),
+                    )
+                    .into_any(),
+                ),
+                (
+                    SettingsRow::Language,
+                    setting_row(
+                        "言語",
+                        caption("同梱サーバーは日本語だけです。接続先によっては効きます"),
+                        Dropdown::new_rw(
+                            form.language,
+                            ["日本語".to_string(), "英語".to_string(), "自動".to_string()],
+                        )
+                        .style(dropdown_style),
+                    )
+                    .into_any(),
+                ),
+                (
+                    SettingsRow::IdleClose,
+                    setting_row(
+                        "発話が無いときに接続を閉じるまで",
+                        caption(""),
+                        numeric_field::<u32>(form.idle_close_sec, "15", "秒"),
+                    )
+                    .into_any(),
+                ),
+            ],
+            hidden,
+        ),
     )
 }
 
-fn microphone_page(form: FormState, state: UiState, smooth_level: RwSignal<f64>) -> impl IntoView {
+fn microphone_page(
+    form: FormState,
+    state: UiState,
+    smooth_level: RwSignal<f64>,
+    hidden: &[SettingsRow],
+) -> impl IntoView {
     let microphone_choices = microphone_choices(&form.selected_microphone.get_untracked().id);
     section_page(
         "マイク",
         "使うマイクと入力レベルを調整します。",
-        vec![
-            setting_row(
-                "入力デバイス",
-                caption(""),
-                Dropdown::new(
-                    move || form.selected_microphone.get(),
-                    microphone_choices.clone(),
-                )
-                .on_accept(move |choice| form.selected_microphone.set(choice))
-                .style(dropdown_style),
-            )
-            .into_any(),
-            setting_row(
-                "入力ゲイン",
-                caption("小さすぎると拾えず、大きすぎると歪みます"),
-                h_stack((
-                    slider_control(form.gain),
-                    label(move || format!("×{:.1}", gain_from_pct(form.gain.get())))
-                        .style(caption_style),
-                ))
-                .style(|style| style.width(292.0).items_center().gap(theme::space::MD)),
-            )
-            .into_any(),
-            setting_row(
-                "入力レベル",
-                caption("いま話して、青の範囲に入るように調整します"),
-                level_meter(state, smooth_level, form.reduce_motion),
-            )
-            .into_any(),
-        ],
+        keep_visible(
+            vec![
+                (
+                    SettingsRow::Microphone,
+                    setting_row(
+                        "入力デバイス",
+                        caption(""),
+                        Dropdown::new(
+                            move || form.selected_microphone.get(),
+                            microphone_choices.clone(),
+                        )
+                        .on_accept(move |choice| form.selected_microphone.set(choice))
+                        .style(dropdown_style),
+                    )
+                    .into_any(),
+                ),
+                (
+                    SettingsRow::InputGain,
+                    setting_row(
+                        "入力ゲイン",
+                        caption("小さすぎると拾えず、大きすぎると歪みます"),
+                        h_stack((
+                            slider_control(form.gain),
+                            label(move || format!("×{:.1}", gain_from_pct(form.gain.get())))
+                                .style(caption_style),
+                        ))
+                        .style(|style| style.width(292.0).items_center().gap(theme::space::MD)),
+                    )
+                    .into_any(),
+                ),
+                (
+                    SettingsRow::InputLevel,
+                    setting_row(
+                        "入力レベル",
+                        caption("いま話して、青の範囲に入るように調整します"),
+                        level_meter(state, smooth_level, form.reduce_motion),
+                    )
+                    .into_any(),
+                ),
+            ],
+            hidden,
+        ),
     )
 }
 
-fn recognition_page(form: FormState) -> impl IntoView {
-    section_page(
-        "認識",
-        "音声を文字にする方法と、発話の区切りを調整します。",
+fn recognition_page(
+    form: FormState,
+    hidden: &[SettingsRow],
+    extra_rows: Vec<AnyView>,
+    extra_sections: Vec<AnyView>,
+    sections_first: bool,
+) -> impl IntoView {
+    let mut rows = keep_visible(
         vec![
-            engine_setting_row(form.selected_asr_engine).into_any(),
-            setting_row(
-                "発話の区切り（無音）",
-                numeric_description::<u32>(
-                    form.vad_min_silence_ms,
-                    "これだけ黙ると、そこまでを文字にして貼り付けます",
-                ),
-                numeric_field::<u32>(form.vad_min_silence_ms, "300", "ms"),
-            )
-            .into_any(),
-            setting_row(
-                "発話とみなす最小の長さ",
-                numeric_description::<u32>(form.vad_min_speech_ms, "これより短い音は無視します"),
-                numeric_field::<u32>(form.vad_min_speech_ms, "200", "ms"),
-            )
-            .into_any(),
-            setting_row(
-                "拾いやすさ（VAD しきい値）",
-                caption(""),
-                threshold_control(form.vad_threshold),
-            )
-            .into_any(),
-            setting_row(
-                "話し始めをさかのぼる長さ",
-                numeric_description::<u32>(form.preroll_ms, "検知が遅れたぶんを送ります"),
-                numeric_field::<u32>(form.preroll_ms, "500", "ms"),
-            )
-            .into_any(),
+            (
+                SettingsRow::AsrEngine,
+                engine_setting_row(form.selected_asr_engine).into_any(),
+            ),
+            (
+                SettingsRow::VadMinSilence,
+                setting_row(
+                    "発話の区切り（無音）",
+                    numeric_description::<u32>(
+                        form.vad_min_silence_ms,
+                        "これだけ黙ると、そこまでを文字にして貼り付けます",
+                    ),
+                    numeric_field::<u32>(form.vad_min_silence_ms, "300", "ms"),
+                )
+                .into_any(),
+            ),
+            (
+                SettingsRow::VadMinSpeech,
+                setting_row(
+                    "発話とみなす最小の長さ",
+                    numeric_description::<u32>(form.vad_min_speech_ms, "これより短い音は無視します"),
+                    numeric_field::<u32>(form.vad_min_speech_ms, "200", "ms"),
+                )
+                .into_any(),
+            ),
+            (
+                SettingsRow::VadThreshold,
+                setting_row(
+                    "拾いやすさ（VAD しきい値）",
+                    caption(""),
+                    threshold_control(form.vad_threshold),
+                )
+                .into_any(),
+            ),
+            (
+                SettingsRow::Preroll,
+                setting_row(
+                    "話し始めをさかのぼる長さ",
+                    numeric_description::<u32>(form.preroll_ms, "検知が遅れたぶんを送ります"),
+                    numeric_field::<u32>(form.preroll_ms, "500", "ms"),
+                )
+                .into_any(),
+            ),
         ],
-    )
+        hidden,
+    );
+    rows.extend(extra_rows);
+    // 認識エンジンの行を落とした配布では、方法を選ぶ場所がここではない。
+    // 「音声を文字にする方法と」と言い続けると、上に移った選択と食い違う。
+    let description = if hidden.contains(&SettingsRow::AsrEngine) {
+        "発話の区切りを調整します。"
+    } else {
+        "音声を文字にする方法と、発話の区切りを調整します。"
+    };
+    let card = section_page("認識", description, rows);
+    let added = v_stack_from_iter(extra_sections)
+        .style(|style| style.width_full().min_width(0.0).gap(theme::space::MD));
+    let stacked = if sections_first {
+        v_stack((added.into_any(), card.into_any()))
+    } else {
+        v_stack((card.into_any(), added.into_any()))
+    };
+    stacked.style(|style| style.width_full().min_width(0.0).gap(theme::space::MD))
 }
 
 fn engine_setting_row(selected: RwSignal<AsrEngineChoice>) -> impl IntoView {
@@ -1092,7 +1202,12 @@ fn toggle_control(signal: RwSignal<bool>, reduce_motion: RwSignal<bool>) -> impl
         })
 }
 
-fn setting_row(
+/// 設定の 1 行。**配布側が足す行もこれで作る。**
+///
+/// 公開したのは、[`crate::SettingsExtension`] で足した行だけ枠も余白も
+/// 付かず、他の行と揃わなかったからである（実際にそうなった）。
+/// 見た目を配布側に書かせると、公開版が寸法を変えたときにずれる。
+pub fn setting_row(
     title: &'static str,
     description: impl IntoView + 'static,
     control: impl IntoView + 'static,
@@ -1119,6 +1234,50 @@ fn setting_row(
             .border_bottom(1.0)
             .border_color(theme::color::LINE)
     })
+}
+
+/// 落とす行を除いて、描くものだけを残す。
+///
+/// **配布側が名指しした行だけを落とす。** 順番は公開版のまま保つ。
+/// 型を借りて書いてあるのは、この判断が見た目に依らないからである
+/// （試験は id だけで回せる）。
+fn keep_visible<T>(rows: Vec<(SettingsRow, T)>, hidden: &[SettingsRow]) -> Vec<T> {
+    rows.into_iter()
+        .filter(|(row, _)| !hidden.contains(row))
+        .map(|(_, view)| view)
+        .collect()
+}
+
+/// 配布側が足す中身を集める。`rows` は枠の中、`sections` は枠の外。
+fn extension_views(
+    page: SettingsPage,
+    extensions: &[SettingsExtension],
+    settings: &Settings,
+    state: UiState,
+    commands: &Sender<ControllerCommand>,
+) -> (Vec<AnyView>, Vec<AnyView>, bool) {
+    let mut rows = Vec::new();
+    let mut sections = Vec::new();
+    let mut first = false;
+    for extension in extensions.iter().filter(|item| item.page == page) {
+        if let Some(build) = extension.build_rows.as_ref() {
+            rows.push(build(settings.clone(), state, commands.clone()));
+        }
+        if let Some(build) = extension.build_sections.as_ref() {
+            sections.push(build(settings.clone(), state, commands.clone()));
+            first = first || extension.sections_first;
+        }
+    }
+    (rows, sections, first)
+}
+
+/// この面で落とす行を集める。
+fn hidden_rows(page: SettingsPage, extensions: &[SettingsExtension]) -> Vec<SettingsRow> {
+    extensions
+        .iter()
+        .filter(|item| item.page == page)
+        .flat_map(|item| item.hidden_rows.iter().copied())
+        .collect()
 }
 
 fn section_page(
@@ -1361,7 +1520,8 @@ fn error_text_style(style: Style) -> Style {
     caption_style(style).color(theme::color::ERROR)
 }
 
-fn caption(value: &'static str) -> impl IntoView {
+/// 行の説明文。[`setting_row`] の第 2 引数に渡す。配布側からも使う。
+pub fn caption(value: &'static str) -> impl IntoView {
     label(move || value.to_string()).style(caption_style)
 }
 
@@ -1722,5 +1882,94 @@ mod tests {
             );
         }
         assert_eq!(overlay_transparent_value("unknown"), "auto");
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::{hidden_rows, keep_visible};
+    use crate::wiring::SettingsPage;
+    use crate::{SettingsExtension, SettingsRow};
+
+    #[test]
+    fn a_named_row_can_be_dropped() {
+        let rows = vec![
+            (SettingsRow::AsrEngine, "エンジン"),
+            (SettingsRow::VadMinSilence, "無音"),
+            (SettingsRow::Preroll, "さかのぼり"),
+        ];
+        let kept = keep_visible(rows, &[SettingsRow::AsrEngine]);
+        assert_eq!(kept, vec!["無音", "さかのぼり"], "名指しした行だけ落ちる");
+    }
+
+    #[test]
+    fn the_order_survives() {
+        // 落とした後も公開版の並びを保つ。並べ替えると、配布ごとに
+        // 画面の見た目が変わってしまう。
+        let rows = vec![
+            (SettingsRow::VadMinSilence, 1),
+            (SettingsRow::AsrEngine, 2),
+            (SettingsRow::VadMinSpeech, 3),
+        ];
+        assert_eq!(keep_visible(rows, &[SettingsRow::AsrEngine]), vec![1, 3]);
+    }
+
+    #[test]
+    fn nothing_is_dropped_without_a_request() {
+        let rows = vec![(SettingsRow::AsrEngine, "エンジン")];
+        assert_eq!(keep_visible(rows, &[]), vec!["エンジン"], "既定は公開版のまま");
+    }
+
+    #[test]
+    fn only_the_named_page_is_touched() {
+        // 「認識」に指定したものが「一般」に効いてはいけない。
+        let extensions = vec![SettingsExtension::hiding(
+            SettingsPage::Recognition,
+            &[SettingsRow::AsrEngine],
+        )];
+        assert_eq!(
+            hidden_rows(SettingsPage::Recognition, &extensions),
+            vec![SettingsRow::AsrEngine]
+        );
+        assert!(hidden_rows(SettingsPage::General, &extensions).is_empty());
+    }
+
+    #[test]
+    fn several_extensions_stack() {
+        let extensions = vec![
+            SettingsExtension::hiding(SettingsPage::Recognition, &[SettingsRow::AsrEngine]),
+            SettingsExtension::hiding(SettingsPage::Recognition, &[SettingsRow::Preroll]),
+        ];
+        assert_eq!(
+            hidden_rows(SettingsPage::Recognition, &extensions),
+            vec![SettingsRow::AsrEngine, SettingsRow::Preroll]
+        );
+    }
+}
+
+#[cfg(test)]
+mod save_hint_tests {
+    use super::hidden_rows;
+    use crate::wiring::SettingsPage;
+    use crate::{SettingsExtension, SettingsRow};
+
+    /// 認識エンジンを落とした配布では「認識エンジンは再起動後」が嘘になる。
+    /// 出ていない項目の注意書きを読ませない。
+    #[test]
+    fn the_engine_note_follows_the_engine_row() {
+        let none: Vec<SettingsExtension> = Vec::new();
+        assert!(
+            !hidden_rows(SettingsPage::Recognition, &none).contains(&SettingsRow::AsrEngine),
+            "既定では行が出ているので注意書きも出る"
+        );
+
+        let hiding = vec![SettingsExtension::hiding(
+            SettingsPage::Recognition,
+            &[SettingsRow::AsrEngine],
+        )];
+        assert!(
+            hidden_rows(SettingsPage::Recognition, &hiding).contains(&SettingsRow::AsrEngine),
+            "落としたら注意書きも消える"
+        );
     }
 }

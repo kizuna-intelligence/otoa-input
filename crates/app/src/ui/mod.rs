@@ -59,6 +59,7 @@ pub fn run(
     runtime: Runtime,
     settings_view_override: Option<crate::SettingsView>,
     extra_settings_page: Option<crate::ExtraSettingsPage>,
+    settings_extensions: Vec<crate::SettingsExtension>,
 ) -> anyhow::Result<()> {
     let open_settings_on_start = runtime.is_settings_preview();
     let settings_preview_page = runtime
@@ -99,6 +100,7 @@ pub fn run(
     let settings_commands = runtime.commands.clone();
     let settings_view_for_tray = settings_view_override.clone();
     let extra_for_tray = extra_settings_page.clone();
+    let extensions_for_tray = settings_extensions.clone();
     create_effect(move |_| {
         let Some(action) = tray_signal.get() else {
             return;
@@ -111,6 +113,7 @@ pub fn run(
                     SettingsPage::General,
                     settings_view_for_tray.clone(),
                     extra_for_tray.clone(),
+                    extensions_for_tray.clone(),
                 );
             }
             tray::TrayAction::Quit => quit_app(),
@@ -158,6 +161,7 @@ pub fn run(
             settings_preview_page,
             settings_view_override.clone(),
             extra_settings_page.clone(),
+            settings_extensions.clone(),
         );
     }
     app.run();
@@ -172,6 +176,7 @@ pub(crate) fn open_settings_window(
     initial_page: SettingsPage,
     settings_view_override: Option<crate::SettingsView>,
     extra_settings_page: Option<crate::ExtraSettingsPage>,
+    settings_extensions: Vec<crate::SettingsExtension>,
 ) {
     if state.settings_window_open.get_untracked() {
         return;
@@ -191,6 +196,7 @@ pub(crate) fn open_settings_window(
                     window_id,
                     initial_page,
                     extra_settings_page,
+                    settings_extensions,
                 )),
             };
             // 開いたことを覚えるのはここなので、**戻すのもここでやる。**
