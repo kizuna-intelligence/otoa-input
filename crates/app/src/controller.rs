@@ -284,6 +284,12 @@ fn blank_overlay(kind: OverlayKind) -> OverlayView {
 enum WarmupReason {
     Startup,
     Idle,
+    /// 設定で接続先が変わった直後。
+    ///
+    /// **切り替えて保存したら、その場で暖める。** 暖機は登録のときに打つので、
+    /// それまで一度も使っていなかった接続先は冷えたままになる。次の待機タイマー
+    /// か最初の発話まで気づけず、利用者は切り替えた直後だけ長く待たされる。
+    SettingsChanged,
 }
 
 impl WarmupReason {
@@ -291,6 +297,7 @@ impl WarmupReason {
         match self {
             Self::Startup => "startup",
             Self::Idle => "idle",
+            Self::SettingsChanged => "settings_changed",
         }
     }
 }
@@ -455,6 +462,15 @@ pub struct Controller {
     last_text_ui: Option<Instant>,
     audio_capture: Option<AudioCapture>,
     pending_settings: Option<Settings>,
+    /// 保留中の設定が効いたら暖機を打つか。接続先が変わったときだけ立てる。
+    warmup_after_pending_settings: bool,
+    /// このセッションで名乗られるべき方法。`None` なら確認しない。
+    ///
+    /// **確認できるまで転写を受け取らない。** 指定を知らないサーバーは、
+    /// その指定を黙って捨てて別の経路で処理できてしまう。
+    expected_backend: Option<String>,
+    /// サーバーがその方法を名乗ったか。
+    backend_confirmed: bool,
     active_api_key: Option<String>,
     provider: Arc<dyn ConnectionProvider>,
     /// provider とは別に保持する、同梱サーバーの起動失敗。
@@ -568,6 +584,11 @@ impl Controller {
             last_text_ui: None,
             audio_capture: None,
             pending_settings: None,
+            warmup_after_pending_settings: false,
+            expected_backend: None,
+            // 接続のたびに Connected で決め直す。**それまでは確認済みとして扱う。**
+            // 既定を未確認にすると、確認する必要のない構成でも文字を捨ててしまう。
+            backend_confirmed: true,
             active_api_key: None,
             provider,
             bundled_server_failure,
@@ -1200,6 +1221,9 @@ impl Controller {
 
     fn update_settings(&mut self, settings: Settings) {
         let microphone_changed = self.settings.microphone != settings.microphone;
+        // 接続先が変わったなら、その場で暖める。**保存した直後だけ遅い**のを避ける。
+        let route_changed = self.settings.core.server_url != settings.core.server_url
+            || self.settings.product_settings_value() != settings.product_settings_value();
         configure_text_output(&mut self.text_out, &settings);
         let product_settings = settings.product_settings_value();
         self.provider
@@ -1214,6 +1238,11 @@ impl Controller {
                 && settings.listening_enabled;
             self.settings = settings;
             self.rebuild_vad_configuration();
+            if route_changed {
+                // **設定が実際に効いた後に打つ。** 前に打つと、暖めるのは
+                // 切り替える前の接続先になる。
+                let _ = self.start_warmup(WarmupReason::SettingsChanged);
+            }
             if should_enable {
                 self.enable_listening();
             }
@@ -1227,6 +1256,8 @@ impl Controller {
                 }
             }
             self.pending_settings = Some(settings);
+            // まだ効いていないので、効いたときに打つ。
+            self.warmup_after_pending_settings |= route_changed;
         }
     }
 
@@ -1810,6 +1841,8 @@ impl Controller {
                 if !self.session.apply(SessionInput::Connected) {
                     return;
                 }
+                self.expected_backend = self.provider.expected_backend(&self.settings.core);
+                self.backend_confirmed = self.expected_backend.is_none();
                 self.failed_at = None;
                 self.failed_recovery_enabled = false;
                 self.failed_retry_delay = FAILED_RETRY_INITIAL;
@@ -1828,6 +1861,20 @@ impl Controller {
                     self.refresh_overlay();
                 }
                 self.log_session_event("Connected");
+            }
+            AsrEvent::FinalText(_) | AsrEvent::PartialText(_) if !self.backend_confirmed => {
+                // **名乗りが来ないサーバーからは 1 文字も受け取らない。**
+                // 指定を知らない古いゲートウェイは、その指定を黙って捨てて
+                // 別の経路で処理する。黙って落ちるくらいなら繋がらないほうがよい。
+                tracing::error!(
+                    target: "otoa_input",
+                    expected = ?self.expected_backend,
+                    "transcript arrived before the backend was confirmed"
+                );
+                self.fail_runtime_user_action(
+                    "選んだ文字にする方法が使われていません。接続先を確認してください。"
+                        .to_string(),
+                );
             }
             AsrEvent::FinalText(tokens) => {
                 // finalize と同じ応答に含まれる FinalText は現在の発話の
@@ -1925,6 +1972,32 @@ impl Controller {
                     self.resume_after_finished();
                     self.apply_pending_settings();
                     self.refresh_overlay();
+                }
+            }
+            AsrEvent::Backend(actual) => {
+                match self.expected_backend.as_deref() {
+                    Some(expected) if expected == actual => {
+                        self.backend_confirmed = true;
+                        tracing::info!(
+                            target: "otoa_input",
+                            backend = %actual,
+                            "backend confirmed"
+                        );
+                    }
+                    Some(expected) => {
+                        // **選んでいない経路で処理されている。** 文字を受け取る前に切る。
+                        tracing::error!(
+                            target: "otoa_input",
+                            expected = %expected,
+                            actual = %actual,
+                            "backend mismatch"
+                        );
+                        self.fail_runtime_user_action(
+                            "選んだ文字にする方法が使われていません。接続先を確認してください。"
+                                .to_string(),
+                        );
+                    }
+                    None => {}
                 }
             }
             AsrEvent::Notice { code, message } => {
@@ -2613,6 +2686,9 @@ impl Controller {
         configure_text_output(&mut self.text_out, &settings);
         self.settings = settings;
         self.rebuild_vad_configuration();
+        if std::mem::take(&mut self.warmup_after_pending_settings) {
+            let _ = self.start_warmup(WarmupReason::SettingsChanged);
+        }
         if was_enabled && !self.settings.listening_enabled {
             self.disable_listening();
         }
@@ -4426,5 +4502,25 @@ mod tests {
     fn loopback_route_detection_rejects_remote_urls() {
         let parsed = Url::parse("wss://asr.example.com/ws/asr").expect("test URL should parse");
         assert!(!is_loopback_host(parsed.host_str().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod warmup_on_settings_change_tests {
+    use super::WarmupReason;
+
+    /// 切り替えて保存した直後に暖機を打つ理由が、ログから追えること。
+    #[test]
+    fn the_reason_has_its_own_name() {
+        assert_eq!(WarmupReason::SettingsChanged.as_str(), "settings_changed");
+        // 既存の理由と混ざらない。混ざると「なぜ暖めたか」が読めなくなる。
+        assert_ne!(
+            WarmupReason::SettingsChanged.as_str(),
+            WarmupReason::Idle.as_str()
+        );
+        assert_ne!(
+            WarmupReason::SettingsChanged.as_str(),
+            WarmupReason::Startup.as_str()
+        );
     }
 }

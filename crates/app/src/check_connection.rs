@@ -220,7 +220,8 @@ impl EventCounts {
             AsrEvent::Endpoint => EventKind::SpeechEndpoint,
             AsrEvent::FinalizeDone => EventKind::FinalizeDone,
             AsrEvent::Finished => EventKind::Finished,
-            AsrEvent::Notice { .. } => EventKind::Notice,
+            // 名乗りは診断の数え上げでは通知と同じ扱いでよい。**利用者には出さない。**
+            AsrEvent::Notice { .. } | AsrEvent::Backend(_) => EventKind::Notice,
             AsrEvent::Failed(_) => EventKind::Failed,
         };
         self.0[kind as usize] += 1;

@@ -35,6 +35,10 @@ pub enum AsrEvent {
     Finished,
     /// セッションを継続したまま利用者へ伝える通知。
     Notice { code: String, message: String },
+    /// サーバーが名乗った、このセッションで使われている方法。
+    ///
+    /// **利用者には見せない。** 頼んだ方法と違わないかを確かめるためだけに使う。
+    Backend(String),
     /// 復帰不能な失敗。この後スレッドは終了する。
     Failed(AsrError),
 }
@@ -152,6 +156,9 @@ fn run_session(
                         for event in response_events {
                             match &event {
                                 AsrEvent::Finished => finished_received = true,
+                                AsrEvent::Backend(backend) => {
+                                    tracing::debug!(%backend, "ASR backend announced");
+                                }
                                 AsrEvent::Notice { code, .. } => {
                                     // Notice は利用者向けの非致命イベントである。failed
                                     // にせず、この WebSocket をそのまま受信し続ける。

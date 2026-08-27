@@ -25,6 +25,15 @@ pub struct AsrResponse {
     pub notice_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice_message: Option<String>,
+
+    /// サーバーが「どの方法で処理しているか」を名乗る値。**利用者には見せない。**
+    ///
+    /// `notice_*` で送ってはいけない。あれは利用者に見せる通知で、この名前を
+    /// 知らないクライアントは中身をそのまま画面へ出す（実際に「お知らせ /
+    /// my_voice」という意味不明な表示になった）。知らない版はこのフィールドを
+    /// 捨てるだけで、何も起こらない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -81,6 +90,11 @@ pub(crate) fn parse_response(text: &str) -> Result<Vec<AsrEvent>, AsrError> {
             message: response.error_message.unwrap_or_default(),
             request_id: response.request_id,
         })]);
+    }
+
+    if let Some(backend) = response.backend.as_ref() {
+        // 機械向けの値なので、tokens とも notice とも混ぜない。
+        return Ok(vec![AsrEvent::Backend(backend.clone())]);
     }
 
     if let (Some(code), Some(message)) = (
@@ -256,5 +270,35 @@ mod tests {
     fn finished_flag_emits_finished() {
         let events = parse_response(r#"{"finished":true}"#).expect("response should parse");
         assert!(matches!(events.last(), Some(AsrEvent::Finished)));
+    }
+}
+
+#[cfg(test)]
+mod backend_announcement_tests {
+    use super::parse_response;
+    use crate::AsrEvent;
+
+    /// 名乗りは利用者に見せない。**notice で送ると画面に出る。**
+    /// 実際に「お知らせ / my_voice」という意味不明な表示になった。
+    #[test]
+    fn the_announcement_is_not_a_user_notice() {
+        let events = parse_response(r#"{"backend":"my_voice"}"#).unwrap();
+        assert!(
+            matches!(&events[..], [AsrEvent::Backend(name)] if name == "my_voice"),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AsrEvent::Notice { .. })),
+            "利用者向けの通知にしてはいけない"
+        );
+    }
+
+    /// このフィールドを知らない版は、ただ捨てる。
+    #[test]
+    fn an_unknown_field_does_not_break_the_rest() {
+        let events = parse_response(r#"{"tokens":[{"text":"あ"}],"unknown_field":1}"#).unwrap();
+        assert!(!events.is_empty());
     }
 }
