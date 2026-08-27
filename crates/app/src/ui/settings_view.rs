@@ -189,8 +189,18 @@ pub fn view(
         }
     });
 
-    let save_message =
-        RwSignal::new("保存すると反映されます。認識エンジンは再起動後。".to_string());
+    // 認識エンジンを落とした配布では「認識エンジンは再起動後」が嘘になる。
+    // 出ていない項目の注意書きを読ませない。
+    let engine_row_visible = !hidden_rows(SettingsPage::Recognition, &extensions)
+        .contains(&SettingsRow::AsrEngine);
+    let save_message = RwSignal::new(
+        if engine_row_visible {
+            "保存すると反映されます。認識エンジンは再起動後。"
+        } else {
+            "保存すると反映されます。"
+        }
+        .to_string(),
+    );
     let save_message_error = RwSignal::new(false);
     let extra_for_save = extra.clone();
     let extensions_for_save = extensions.clone();
@@ -1172,7 +1182,12 @@ fn toggle_control(signal: RwSignal<bool>, reduce_motion: RwSignal<bool>) -> impl
         })
 }
 
-fn setting_row(
+/// 設定の 1 行。**配布側が足す行もこれで作る。**
+///
+/// 公開したのは、[`crate::SettingsExtension`] で足した行だけ枠も余白も
+/// 付かず、他の行と揃わなかったからである（実際にそうなった）。
+/// 見た目を配布側に書かせると、公開版が寸法を変えたときにずれる。
+pub fn setting_row(
     title: &'static str,
     description: impl IntoView + 'static,
     control: impl IntoView + 'static,
@@ -1479,7 +1494,8 @@ fn error_text_style(style: Style) -> Style {
     caption_style(style).color(theme::color::ERROR)
 }
 
-fn caption(value: &'static str) -> impl IntoView {
+/// 行の説明文。[`setting_row`] の第 2 引数に渡す。配布側からも使う。
+pub fn caption(value: &'static str) -> impl IntoView {
     label(move || value.to_string()).style(caption_style)
 }
 
@@ -1901,6 +1917,33 @@ mod extension_tests {
         assert_eq!(
             hidden_rows(SettingsPage::Recognition, &extensions),
             vec![SettingsRow::AsrEngine, SettingsRow::Preroll]
+        );
+    }
+}
+
+#[cfg(test)]
+mod save_hint_tests {
+    use super::hidden_rows;
+    use crate::wiring::SettingsPage;
+    use crate::{SettingsExtension, SettingsRow};
+
+    /// 認識エンジンを落とした配布では「認識エンジンは再起動後」が嘘になる。
+    /// 出ていない項目の注意書きを読ませない。
+    #[test]
+    fn the_engine_note_follows_the_engine_row() {
+        let none: Vec<SettingsExtension> = Vec::new();
+        assert!(
+            !hidden_rows(SettingsPage::Recognition, &none).contains(&SettingsRow::AsrEngine),
+            "既定では行が出ているので注意書きも出る"
+        );
+
+        let hiding = vec![SettingsExtension::hiding(
+            SettingsPage::Recognition,
+            &[SettingsRow::AsrEngine],
+        )];
+        assert!(
+            hidden_rows(SettingsPage::Recognition, &hiding).contains(&SettingsRow::AsrEngine),
+            "落としたら注意書きも消える"
         );
     }
 }
