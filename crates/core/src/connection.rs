@@ -76,6 +76,16 @@ pub trait ConnectionProvider: Send + Sync + 'static {
         self.endpoint(settings)
     }
 
+    /// このセッションで使われるべき方法の名前。`None` なら確認しない。
+    ///
+    /// **名前を返した provider は、サーバーがその名前を名乗るまで転写を受け取らない。**
+    /// 接続先の指定を知らないサーバーは、その指定を黙って捨てて別の経路で処理できて
+    /// しまう。実際に、本人の声だけを選んだ利用者の音声が他社のクラウドへ流れていた。
+    /// **黙って別の経路に落ちるくらいなら、繋がらないほうがよい。**
+    fn expected_backend(&self, _settings: &Settings) -> Option<String> {
+        None
+    }
+
     /// 長時間使っていなかった認識サービスを、発話前に起こせるか。
     ///
     /// 常駐サービスなど、起動処理が不要な provider は `false` のままでよい。
