@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn policy_close_reason_is_reported_as_rejection() {
-        const REASON: &str = "subscription inactive";
+        const REASON: &str = "not allowed";
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener
