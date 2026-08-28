@@ -38,6 +38,13 @@ const ENROLL_RETRY_MAX: Duration = Duration::from_secs(60);
 /// Modal の scaledown_window と揃える。これ以上 ASR の成功応答が無ければ、
 /// 次の発話の前に enrollment を送り、認識器が起きるまで待つ。
 const WARMUP_IDLE_THRESHOLD: Duration = Duration::from_secs(60);
+/// 最後に喋ってからこれだけ経ったら、暖機をやめる。
+///
+/// **止めないと、開いているだけで GPU が一日中起きたままになる。**
+/// 向こうは使った時間で課金されるので、使っていないなら 0 台に落とす意味がある。
+/// 落ちた後の 1 発話はコールドスタートを待つが、それは「久しぶりに使う」ときだけで、
+/// 会話の合間の 60 秒はこの窓の内側なので待たない。
+const WARMUP_ACTIVE_WINDOW: Duration = Duration::from_secs(10 * 60);
 #[allow(dead_code)]
 const CONNECTING_TIMEOUT: Duration = Duration::from_secs(10);
 #[allow(dead_code)]
@@ -1010,6 +1017,7 @@ impl Controller {
 
     fn warmup_is_due(&self) -> bool {
         self.provider.enrollment_is_eligible(&self.settings.core)
+            && self.recently_used()
             && !matches!(self.facts.error, Some(UserError::Persistent { .. }))
             && self
                 .warmup_retry_at
@@ -1017,6 +1025,15 @@ impl Controller {
             && self
                 .last_successful_asr_response_at
                 .is_none_or(|last_response| last_response.elapsed() >= WARMUP_IDLE_THRESHOLD)
+    }
+
+    /// 最近この機械で喋ったか。**暖機を続けてよいかの判断**に使う。
+    ///
+    /// 一度も喋っていないなら、起動しただけで待受に入っただけである。そのために
+    /// 向こうの GPU を起こし続ける理由はない。
+    fn recently_used(&self) -> bool {
+        self.last_confident_speech_at
+            .is_some_and(|at| at.elapsed() < WARMUP_ACTIVE_WINDOW)
     }
 
     /// 無操作中に認識器を起こす。最初の SpeechStarted まで待つと、その発話を
@@ -3180,6 +3197,9 @@ mod tests {
     #[test]
     fn speech_after_sixty_seconds_warms_before_opening_a_session() {
         let (mut controller, calls) = warmup_controller(Settings::default());
+        // 暖機は「最近使った」ときだけ続く。使っていない機械で
+        // GPU を起こし続けないため。
+        controller.last_confident_speech_at = Some(Instant::now());
         assert!(controller.session.apply(SessionInput::Enable));
         controller.last_successful_asr_response_at = Some(Instant::now() - WARMUP_IDLE_THRESHOLD);
 
@@ -3204,6 +3224,9 @@ mod tests {
     #[test]
     fn idle_warmup_starts_before_the_next_speech() {
         let (mut controller, calls) = warmup_controller(Settings::default());
+        // 暖機は「最近使った」ときだけ続く。使っていない機械で
+        // GPU を起こし続けないため。
+        controller.last_confident_speech_at = Some(Instant::now());
         assert!(controller.session.apply(SessionInput::Enable));
         controller.last_successful_asr_response_at = Some(Instant::now() - WARMUP_IDLE_THRESHOLD);
 
@@ -3226,6 +3249,8 @@ mod tests {
     #[test]
     fn temporary_warmup_failure_returns_to_a_retryable_state() {
         let (mut controller, _calls) = warmup_controller(Settings::default());
+        // 暖機は「最近使った」ときだけ続く。
+        controller.last_confident_speech_at = Some(Instant::now());
         controller.warmup_in_progress = true;
         controller.set_overlay(OverlayView::Shown {
             kind: OverlayKind::WarmingUp,
@@ -3259,6 +3284,8 @@ mod tests {
         });
         let mut controller = controller_with_provider(Settings::default(), provider);
         assert!(controller.session.apply(SessionInput::Enable));
+        // 暖機は「最近使った」ときだけ続く。
+        controller.last_confident_speech_at = Some(Instant::now());
         let before = Instant::now();
 
         controller.start_idle_warmup_if_due();
@@ -3300,6 +3327,9 @@ mod tests {
     #[test]
     fn disabled_session_does_not_start_idle_warmup() {
         let (mut controller, calls) = warmup_controller(Settings::default());
+        // 暖機は「最近使った」ときだけ続く。使っていない機械で
+        // GPU を起こし続けないため。
+        controller.last_confident_speech_at = Some(Instant::now());
         assert_eq!(controller.session.state(), SessionState::Disabled);
 
         controller.start_idle_warmup_if_due();
@@ -4507,7 +4537,26 @@ mod tests {
 
 #[cfg(test)]
 mod warmup_on_settings_change_tests {
-    use super::WarmupReason;
+    use super::{WarmupReason, WARMUP_ACTIVE_WINDOW, WARMUP_IDLE_THRESHOLD};
+
+    /// **使っていない機械で GPU を起こし続けない。**
+    ///
+    /// 暖機は 60 秒ごとに打つので、止めないとアプリを開いているだけで
+    /// 向こうの GPU が一日中起きたままになる。サーバーレスで動かしている
+    /// 以上、使っていないなら 0 台に落ちなければ意味がない。実際に L4 が
+    /// 2 台、使っていないほうも含めて起き続けた。
+    #[test]
+    fn the_warm_window_is_longer_than_the_gap_it_covers() {
+        assert!(
+            WARMUP_ACTIVE_WINDOW > WARMUP_IDLE_THRESHOLD,
+            "会話の合間より短いと、話している最中に暖機が止まる"
+        );
+        // 際限なく起こし続けないこと。長すぎる窓は「止めない」のと同じ。
+        assert!(
+            WARMUP_ACTIVE_WINDOW <= std::time::Duration::from_secs(30 * 60),
+            "窓が長すぎると、使っていない時間まで GPU を起こし続ける"
+        );
+    }
 
     /// 切り替えて保存した直後に暖機を打つ理由が、ログから追えること。
     #[test]
