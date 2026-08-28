@@ -16,6 +16,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# **変数名の直後に全角文字を置かない。** macOS の bash は 3.2 で、非 ASCII
+# バイトを識別子の一部として読む。`$VERSION（` と書くと `VERSION（` という
+# 名前だと解釈し、set -u で「unbound variable」になって梱包だけが落ちる。
+# 続ける必要があるときは `${VERSION}` と括る。
 ROOT="$PWD"
 OUT="${OUT_DIR:-$ROOT/dist}"
 
@@ -122,7 +127,7 @@ $PLATFORM_NOTE
    models/kodama-ja-streaming-small/ に置き、設定画面の「認識エンジン」で
    kodama を選びます。.onnx.data を忘れると読み込みに失敗します。
 
-この配布物の版: $VERSION（$LAUNCH --version でも確かめられます）
+この配布物の版: ${VERSION}（$LAUNCH --version でも確かめられます）
 詳細は README.md、オプションは --help を見てください。
 EOF
 
