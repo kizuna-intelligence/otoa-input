@@ -11,11 +11,23 @@
 #   OTOA_ASC_KEY         App Store Connect API キー (.p8)
 #   OTOA_ASC_KEY_ID      その key-id
 #   OTOA_ASC_ISSUER      その issuer-id
+#
+# 配布ごとに変えられるもの（省略すると公開版の値になる）:
+#   OTOA_BUNDLE_ID       bundle id（既定 ai.otoa.input.oss）
+#   OTOA_APP_NAME        .app の表示名（既定 Otoa Input）
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+# **逆順 DNS は自分が持つドメインで名乗る。** 以前は jp.otoa.input と書いていたが、
+# 逆順にすると otoa.jp になり、これは別の団体が持っている。持っているのは otoa.ai。
+#
+# 配布ごとに変える。同じ id だと 1 台に両方を入れられず、マイクや貼り付けの
+# 許可も取り合う。設定の置き場を otoa-input / otoa-input-oss と分けているのと
+# 同じ理由である。
+BUNDLE_ID="${OTOA_BUNDLE_ID:-ai.otoa.input.oss}"
+APP_DISPLAY_NAME="${OTOA_APP_NAME:-Otoa Input}"
 [ "$(uname -s)" = Darwin ] || { echo "Mac 実機で実行する" >&2; exit 1; }
 
 for v in OTOA_SIGN_CERT_PEM OTOA_SIGN_KEY_PEM OTOA_ASC_KEY OTOA_ASC_KEY_ID OTOA_ASC_ISSUER; do
@@ -27,7 +39,7 @@ WORK=/tmp/otoa-macos-package
 # 鍵や中間ファイルを置いてはいけないし、DMG 自体もここへ書いてはいけない
 # （自分を取り込みながら膨らみ、空き容量を食い潰す）。
 STAGE="$WORK/dmgroot"
-APP="$STAGE/Otoa Input.app"
+APP="$STAGE/$APP_DISPLAY_NAME.app"
 SECRETS="$WORK/secrets"
 KC=/tmp/otoa-sign.keychain-db
 # 使い捨てキーチェーンの合鍵。**固定値を書かない。**
@@ -54,9 +66,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Otoa Input</string>
-  <key>CFBundleDisplayName</key><string>Otoa Input</string>
-  <key>CFBundleIdentifier</key><string>jp.otoa.input</string>
+  <key>CFBundleName</key><string>$APP_DISPLAY_NAME</string>
+  <key>CFBundleDisplayName</key><string>$APP_DISPLAY_NAME</string>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>otoa-input</string>
   <key>CFBundleIconFile</key><string>icon</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
