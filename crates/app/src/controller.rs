@@ -1032,6 +1032,15 @@ impl Controller {
                 .is_none_or(|last_response| last_response.elapsed() >= WARMUP_IDLE_THRESHOLD)
     }
 
+    /// 接続先が変わったか。**変わったなら張ってある接続を切る。**
+    ///
+    /// 切らないと、設定も暖機も新しい方に変わるのに、音声だけが前の接続へ
+    /// 流れ続ける。画面上は切り替わったように見えるので気づけない。
+    fn route_differs(&self, next: &Settings) -> bool {
+        self.settings.core.server_url != next.core.server_url
+            || self.settings.product_settings_value() != next.product_settings_value()
+    }
+
     /// 最近この機械で喋ったか。**暖機を続けてよいかの判断**に使う。
     ///
     /// 一度も喋っていないなら、起動しただけで待受に入っただけである。そのために
@@ -1244,8 +1253,7 @@ impl Controller {
     fn update_settings(&mut self, settings: Settings) {
         let microphone_changed = self.settings.microphone != settings.microphone;
         // 接続先が変わったなら、その場で暖める。**保存した直後だけ遅い**のを避ける。
-        let route_changed = self.settings.core.server_url != settings.core.server_url
-            || self.settings.product_settings_value() != settings.product_settings_value();
+        let route_changed = self.route_differs(&settings);
         configure_text_output(&mut self.text_out, &settings);
         let product_settings = settings.product_settings_value();
         self.provider
@@ -1261,6 +1269,11 @@ impl Controller {
             self.settings = settings;
             self.rebuild_vad_configuration();
             if route_changed {
+                // **張ってある接続を切る。** 接続先が変わっても切らないと、
+                // 音声は前の接続へ流れ続ける。設定も暖機も新しい方に変わるので、
+                // 画面上は切り替わったように見えるのに、実際は前の経路で
+                // 処理される。**実際にそうなった。**
+                self.cleanup_asr();
                 // **設定が実際に効いた後に打つ。** 前に打つと、暖めるのは
                 // 切り替える前の接続先になる。
                 let _ = self.start_warmup(WarmupReason::SettingsChanged);
@@ -2747,6 +2760,8 @@ impl Controller {
         self.settings = settings;
         self.rebuild_vad_configuration();
         if std::mem::take(&mut self.warmup_after_pending_settings) {
+            // 保留していた設定が効いたときも、接続を張り直す。理由は同じ。
+            self.cleanup_asr();
             let _ = self.start_warmup(WarmupReason::SettingsChanged);
         }
         if was_enabled && !self.settings.listening_enabled {
@@ -3181,6 +3196,33 @@ mod tests {
             vad_events,
         )
         .expect("controller should initialize for the enrollment test")
+    }
+
+
+    /// 接続先が変わったことを見分けられること。
+    ///
+    /// **見分けられないと、前の接続へ音声が流れ続ける。** 設定も暖機も新しい
+    /// 方に変わるので、画面上は切り替わったように見えて気づけない。実際に、
+    /// 方法を切り替えたのに前の方法で処理され続けた。
+    #[test]
+    fn a_changed_product_setting_is_a_changed_route() {
+        let (controller, _calls) = warmup_controller(Settings::default());
+        let mut next = controller.settings.clone();
+        assert!(!controller.route_differs(&next), "同じ設定なら変わっていない");
+
+        next.product = serde_json::json!({"asr_backend": "my_voice"});
+        assert!(
+            controller.route_differs(&next),
+            "文字にする方法が変われば接続先も変わる"
+        );
+    }
+
+    #[test]
+    fn a_changed_server_url_is_a_changed_route() {
+        let (controller, _calls) = warmup_controller(Settings::default());
+        let mut next = controller.settings.clone();
+        next.core.server_url = "wss://example.invalid/ws/asr".to_string();
+        assert!(controller.route_differs(&next));
     }
 
     fn warmup_controller(settings: Settings) -> (Controller, Arc<AtomicUsize>) {
