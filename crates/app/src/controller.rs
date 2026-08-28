@@ -420,6 +420,10 @@ pub struct Controller {
     /// サーバーが `<end>` を返し、かつ端末側でも発話中でない間は、無音を
     /// 同じストリームへ送り続けない。次の発話に備えてプリロールだけ保つ。
     server_audio_paused: bool,
+    /// `<end>` の時点で VAD がまだ喋っていたため止め損ねた送信停止。VAD が
+    /// 黙った時点で適用する。これを持ち越さないと、以後 VAD と無関係に
+    /// マイク入力が流れ続け、背景音が新しい発話として書き起こされる。
+    pause_when_gate_stops: bool,
     /// `finalize` を送ってから結果が返るまで。オーバーレイの「文字にしています」表示に使う。
     finalize_pending: bool,
     /// 最後に「確実に声だった」フレームの時刻(確率 >= 0.9)。
@@ -558,6 +562,7 @@ impl Controller {
             #[cfg(test)]
             server_response_wait_overlay_visible: false,
             server_audio_paused: false,
+            pause_when_gate_stops: false,
             finalize_pending: false,
             last_confident_speech_at: None,
             pending_completed_by_final_text: false,
@@ -1404,6 +1409,7 @@ impl Controller {
                         self.last_speech_endpoint_at = Some(Instant::now());
                         if self.server_audio_paused {
                             self.server_audio_paused = false;
+                            self.pause_when_gate_stops = false;
                             let preroll = self.preroll.take();
                             if !preroll.is_empty() {
                                 tracing::debug!(
@@ -1522,6 +1528,18 @@ impl Controller {
             //
             // ただし表示は端末の都合で先に動かしてよい。応答を待っている
             // ことを利用者へ見せるのは、判断ではなく見せ方の話である。
+            //
+            // ただし前の `<end>` で止め損ねた送信はここで止める。止めないと
+            // VAD を通さない音がサーバーへ流れ続ける。
+            if self.pause_when_gate_stops {
+                self.pause_when_gate_stops = false;
+                self.server_audio_paused = true;
+                self.preroll.clear();
+                tracing::debug!(
+                    target: "otoa_input",
+                    "paused server ASR audio after deferred endpoint"
+                );
+            }
             self.start_server_response_wait();
         } else if self.settings.endpoint_mode == "client" {
             let reason = if self.session.state() != SessionState::Streaming {
@@ -1582,6 +1600,7 @@ impl Controller {
 
     fn start_asr(&mut self, preroll: Vec<i16>) -> anyhow::Result<()> {
         self.server_audio_paused = false;
+        self.pause_when_gate_stops = false;
         let endpoint = self.provider.endpoint(&self.settings.core)?;
 
         let config_key = endpoint
@@ -1938,6 +1957,11 @@ impl Controller {
                 }
                 self.finalize_pending = false;
                 self.last_speech_endpoint_at = Some(Instant::now());
+                if self.settings.endpoint_mode == "server" && self.gate.is_speaking() {
+                    // 次の発話を拾っている最中なので今は止められない。VAD が
+                    // 黙ったら止める。
+                    self.pause_when_gate_stops = true;
+                }
                 if self.settings.endpoint_mode == "server" && !self.gate.is_speaking() {
                     // `<end>` を受けた後は次の SpeechStarted まで送信を止める。
                     // ただし、既に次の発話を拾っている場合は古い `<end>` の可能性
@@ -2745,6 +2769,7 @@ impl Controller {
         self.finalize_pending = false;
         self.client_finalize_sent = false;
         self.server_audio_paused = false;
+        self.pause_when_gate_stops = false;
         self.to_asr = None;
         self.asr_events = None;
         if let Some(session_thread) = self.asr_thread.take() {
@@ -4364,6 +4389,33 @@ mod tests {
         controller.handle_asr_event(AsrEvent::Endpoint);
 
         assert!(!controller.server_audio_paused);
+    }
+
+    /// `<end>` の時点で VAD が喋っていると送信を止め損ねる。止め損ねたまま
+    /// にすると、以後 VAD を通さない音がサーバーへ流れ続け、背景音が新しい
+    /// 発話として書き起こされる。VAD が黙った時点で止まること。
+    #[test]
+    fn server_endpoint_during_speech_pauses_audio_once_the_gate_goes_quiet() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+        assert!(controller.gate.is_speaking());
+
+        controller.handle_asr_event(AsrEvent::Endpoint);
+        assert!(!controller.server_audio_paused);
+
+        end_speech(&mut controller);
+        assert!(controller.server_audio_paused, "VAD が黙ったら送信を止める");
+
+        while asr_commands.try_recv().is_ok() {}
+        controller.handle_vad_samples(&[101, -202]);
+        assert!(
+            asr_commands.try_recv().is_err(),
+            "止めた後は背景音を送らない"
+        );
     }
 
     #[test]
