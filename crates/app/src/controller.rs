@@ -8,7 +8,7 @@ use otoa_input_core::{
 };
 use otoa_input_platform::{AudioCapture, AudioFrame, PasteMethod, PasteShortcut, TextOutput};
 use otoa_input_protocol::{
-    AsrCommand, AsrConfig, AsrError, AsrEvent, AsrSession, AsrToken, EndpointTuning,
+    AsrCommand, AsrConfig, AsrError, AsrEvent, AsrSession, AsrToken, POLICY_VIOLATION_CLOSE_CODE,
 };
 use otoa_input_vad::{VAD_FRAME_MS, VAD_SAMPLE_RATE};
 use std::borrow::Cow;
@@ -1848,7 +1848,7 @@ impl Controller {
     }
 
     fn handle_asr_event(&mut self, event: AsrEvent) {
-        if !matches!(&event, AsrEvent::Failed(_)) {
+        if !matches!(&event, AsrEvent::Failed(_) | AsrEvent::Closed { .. }) {
             // 接続確立や文字列・終話の応答が来ていれば、サービスは直近まで使われて
             // いた。次の発話を 60 秒未満で始める限り、余計な warmup はしない。
             self.last_successful_asr_response_at = Some(Instant::now());
@@ -2015,6 +2015,25 @@ impl Controller {
                         );
                     }
                     None => {}
+                }
+            }
+            AsrEvent::Closed { code, reason } => {
+                self.complete_pending_wait("ASR WebSocket closed");
+                if code == Some(POLICY_VIOLATION_CLOSE_CODE) {
+                    let message = if reason.is_empty() {
+                        "音声認識サービスへの接続が拒否されました".to_string()
+                    } else {
+                        reason
+                    };
+                    tracing::warn!(?code, "ASR connection rejected by server");
+                    self.fail_runtime(message);
+                } else if self.asr_closing || self.session.state() == SessionState::Closing {
+                    tracing::debug!(?code, "ASR connection closed during normal shutdown");
+                    self.finish_asr_shutdown();
+                } else if !reason.is_empty() {
+                    self.fail_runtime(reason);
+                } else {
+                    self.abort_asr_session(AsrError::ClosedEarly);
                 }
             }
             AsrEvent::Notice { code, message } => {
@@ -2930,7 +2949,9 @@ mod tests {
         Account, ConnectionProvider, Endpoint, EnrollOutcome, EnrollReason, GateEvent,
         PasteShortcutSetting, PrepareAction, Readiness, SessionInput, SessionState,
     };
-    use otoa_input_protocol::{AsrCommand, AsrError, AsrEvent, AsrToken};
+    use otoa_input_protocol::{
+        AsrCommand, AsrError, AsrEvent, AsrToken, POLICY_VIOLATION_CLOSE_CODE,
+    };
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -4272,6 +4293,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn policy_close_shows_the_server_reason_in_the_overlay() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+
+        controller.handle_asr_event(AsrEvent::Closed {
+            code: Some(POLICY_VIOLATION_CLOSE_CODE),
+            reason: "not allowed".to_string(),
+        });
+
+        assert_eq!(controller.session.state(), SessionState::Failed);
+        assert_eq!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::Error,
+                committed: String::new(),
+                partial: String::new(),
+                error: "not allowed".to_string(),
+            }
+        );
     }
 
     #[test]
