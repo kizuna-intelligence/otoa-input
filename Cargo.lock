@@ -3209,6 +3209,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "tungstenite",
  "url",
 ]
 

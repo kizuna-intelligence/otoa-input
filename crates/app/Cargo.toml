@@ -35,3 +35,6 @@ gtk = "0.18"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = { version = "0.21", default-features = false }
+
+[dev-dependencies]
+tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
