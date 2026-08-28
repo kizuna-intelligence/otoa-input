@@ -4200,7 +4200,7 @@ mod tests {
 
         controller.handle_asr_event(AsrEvent::Closed {
             code: Some(POLICY_VIOLATION_CLOSE_CODE),
-            reason: "subscription inactive".to_string(),
+            reason: "not allowed".to_string(),
         });
 
         assert_eq!(controller.session.state(), SessionState::Failed);
@@ -4210,7 +4210,7 @@ mod tests {
                 kind: OverlayKind::Error,
                 committed: String::new(),
                 partial: String::new(),
-                error: "subscription inactive".to_string(),
+                error: "not allowed".to_string(),
             }
         );
     }
