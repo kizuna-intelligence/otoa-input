@@ -135,9 +135,15 @@ pub fn run(
 
     let overlay_commands = runtime.commands.clone();
     let command_for_termination = runtime.commands.clone();
-    let app = Application::new().on_event(move |event| {
-        if matches!(event, AppEvent::WillTerminate) {
+    let reopen_actions = tray_actions.clone();
+    let app = Application::new().on_event(move |event| match event {
+        AppEvent::WillTerminate => {
             let _ = command_for_termination.send(ControllerCommand::Shutdown);
+        }
+        // macOS で Dock のアイコンから開き直したとき。トレイに手が届かない
+        // ときの設定導線として、トレイの「設定…」と同じ道へ流す。
+        AppEvent::Reopen { .. } => {
+            let _ = reopen_actions.send(tray::TrayAction::OpenSettings);
         }
     });
     // トレイの生成は **イベントループを作った後** に行う。macOS/Windows では
