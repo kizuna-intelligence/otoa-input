@@ -1290,9 +1290,23 @@ impl Controller {
                     ));
                 }
             }
+            if route_changed {
+                // **接続先が変わったら、待たずに効かせる。**
+                //
+                // 保留すると、効くのは今のセッションが終わったときになる。待受
+                // 中はセッションが終わらないので、**保存したのに何も変わらない**。
+                // 起動し直したときだけ切り替わる、という形になっていた。
+                //
+                // 途中の発話は失われるが、利用者は文字にする方法を変えたので
+                // あって、いまの発話を続けたいわけではない。
+                self.settings = settings;
+                self.rebuild_vad_configuration();
+                self.cleanup_asr();
+                let _ = self.start_warmup(WarmupReason::SettingsChanged);
+                self.refresh_overlay();
+                return;
+            }
             self.pending_settings = Some(settings);
-            // まだ効いていないので、効いたときに打つ。
-            self.warmup_after_pending_settings |= route_changed;
         }
     }
 
@@ -3215,6 +3229,44 @@ mod tests {
             controller.route_differs(&next),
             "文字にする方法が変われば接続先も変わる"
         );
+    }
+
+    /// **待受中に方法を変えたら、その場で張ってある接続を切ること。**
+    ///
+    /// 保留すると、効くのは今のセッションが終わったときになる。待受中は
+    /// セッションが終わらないので、保存したのに何も変わらない。起動し直した
+    /// ときだけ切り替わる、という形になっていた。**実際にそうなった。**
+    #[test]
+    fn changing_the_method_while_listening_takes_effect_now() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+        assert!(
+            !matches!(
+                controller.session.state(),
+                SessionState::Disabled | SessionState::Failed
+            ),
+            "待受中であること"
+        );
+
+        let mut next = controller.settings.clone();
+        next.product = serde_json::json!({"asr_backend": "my_voice_fast"});
+        controller.update_settings(next);
+
+        assert!(
+            controller.pending_settings.is_none(),
+            "接続先の変更は保留しない"
+        );
+        assert_eq!(
+            controller.settings.product_settings_value(),
+            Some(serde_json::json!({"asr_backend": "my_voice_fast"})),
+            "新しい方法が効いていること"
+        );
+        assert!(controller.to_asr.is_none(), "張ってある接続を切ること");
+        drop(asr_commands);
     }
 
     #[test]
