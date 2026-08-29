@@ -1,3 +1,4 @@
+pub mod activation;
 mod audio;
 pub mod console;
 mod dotenv;

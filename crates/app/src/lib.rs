@@ -247,8 +247,11 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
   -h, --help          この使い方を表示する
   -V, --version       版を表示する
 
-設定はトレイアイコンの「設定」から変更する。設定ファイルの場所は
-Linux なら ~/.config/otoa-input-oss/settings.json。
+設定はトレイアイコンの「設定」から変更する。トレイアイコンに手が届かない
+ときは、起動中にもう一度 otoa-input を起動すると、動いている方へ
+「設定画面を開け」と合図して終了する。macOS では Dock のアイコンから
+開き直しても設定画面が開く。
+設定ファイルの場所は Linux なら ~/.config/otoa-input-oss/settings.json。
 
 接続先が空のときは、同梱の otoa-asr-server を既定の設定で起動した
 アドレス (ws://127.0.0.1:8770/asr/v1) へ繋ぐ。
@@ -425,8 +428,19 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
             None
         }
         Err(_) => {
-            eprintln!("otoa-input is already running");
-            std::process::exit(1);
+            // 既に起動している。エラーではなく「設定画面を開け」の合図にする。
+            // メニューバーが混んでいてトレイアイコンに手が届かないとき、
+            // もう一度開くだけで設定へ辿り着けるようにするためである。
+            match otoa_input_platform::activation::request_open_settings() {
+                Ok(()) => {
+                    println!("otoa-input は既に起動しています。設定画面を開くよう合図しました。");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("otoa-input is already running (設定を開く合図も置けませんでした: {error:#})");
+                    std::process::exit(1);
+                }
+            }
         }
     };
 
