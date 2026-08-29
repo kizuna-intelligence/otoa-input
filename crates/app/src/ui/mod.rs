@@ -89,6 +89,19 @@ pub fn run(
     let ui_signal = create_signal_from_channel(ui_updates);
     let (tray_actions, tray_events) = crossbeam_channel::unbounded();
     let (tray_updates, tray_update_rx) = crossbeam_channel::unbounded();
+
+    // 二度目の起動が置いた「設定画面を開け」の合図を拾い、トレイの「設定…」と
+    // 同じ道へ流す。開き方をここで二重に持たないためである。
+    // 起動前からの残骸は捨てる。前回の合図で、起動するなり設定画面が
+    // 開くのを防ぐ。
+    let _ = otoa_input_platform::activation::take_open_settings_request();
+    let activation_actions = tray_actions.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if otoa_input_platform::activation::take_open_settings_request() {
+            let _ = activation_actions.send(tray::TrayAction::OpenSettings);
+        }
+    });
     let tray_updates_for_ui = tray_updates.clone();
     create_effect(move |_| {
         if let Some(update) = ui_signal.get() {
