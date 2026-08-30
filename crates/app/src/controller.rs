@@ -38,15 +38,6 @@ const ENROLL_RETRY_MAX: Duration = Duration::from_secs(60);
 /// Modal の scaledown_window と揃える。これ以上 ASR の成功応答が無ければ、
 /// 次の発話の前に enrollment を送り、認識器が起きるまで待つ。
 const WARMUP_IDLE_THRESHOLD: Duration = Duration::from_secs(60);
-/// 暖機の表示を、最低これだけは出す。
-///
-/// **一瞬で終わる暖機を、出さなかったことにしない。** 実測 230〜750ms で
-/// 終わるので、出しっぱなしにしないと点滅すら見えない。利用者からは
-/// 「喋ったのに何も起きない」に見え、待たされた理由が分からなかった。
-///
-/// ただし次に見せるものができたら、そちらを優先して即座に譲る。接続中や
-/// 認識中を隠すと、こんどは進んでいないように見える。
-const WARMUP_MIN_VISIBLE: Duration = Duration::from_millis(700);
 /// 最後に喋ってからこれだけ経ったら、暖機をやめる。
 ///
 /// **止めないと、開いているだけで GPU が一日中起きたままになる。**
@@ -66,6 +57,13 @@ const CLOSING_TIMEOUT: Duration = Duration::from_secs(8);
 /// 何が起きたのかも分からなかった。
 #[derive(Default)]
 struct DeferredSpeech {
+    /// 喋り出しの直前まで溜めてあった音声。
+    ///
+    /// **捨ててはいけない。** warmup は 250ms 程度で終わるので、保留のあいだに
+    /// 溜まるのは 1 フレームほどしかない。頭を落とすと、送られるのは語尾だけの
+    /// 短い音声になり、話者照合のチャンクが足りずに「登録した声と一致しません
+    /// でした」で弾かれる。**実際にそうなった。**
+    preroll: Vec<i16>,
     audio: Vec<Vec<i16>>,
     /// VAD が終話まで見届けたか。
     ended: bool,
@@ -319,6 +317,12 @@ enum WarmupReason {
     /// それまで一度も使っていなかった接続先は冷えたままになる。次の待機タイマー
     /// か最初の発話まで気づけず、利用者は切り替えた直後だけ長く待たされる。
     SettingsChanged,
+    /// **参照音声を録り直したら、その場で登録し直す。**
+    ///
+    /// 録り直しは設定を変えないので、接続先が変わったことにはならない。
+    /// 次の無操作まで待つと、そのあいだサーバーは古い声で照合し続ける
+    /// （実測で 5 分近く空いた）。
+    VoiceChanged,
 }
 
 impl WarmupReason {
@@ -327,6 +331,7 @@ impl WarmupReason {
             Self::Startup => "startup",
             Self::Idle => "idle",
             Self::SettingsChanged => "settings_changed",
+            Self::VoiceChanged => "voice_changed",
         }
     }
 }
@@ -351,6 +356,11 @@ pub enum ControllerCommand {
     StartLogin,
     Logout,
     UpdateSettings(Box<Settings>),
+    /// 参照音声を録り直した。**その場で登録し直す。**
+    ///
+    /// 登録の道は暖機 1 本にまとめてある。呼ぶ側が自分で資格情報を取り直して
+    /// 登録すると、同じことをする道が 2 つになり、片方だけ画面に出ない。
+    RefreshVoiceEnrollment,
     Shutdown,
 }
 
@@ -412,8 +422,21 @@ pub struct Controller {
     /// 保留していた発話で ASR を開始したとき、Connected になったら端末側で
     /// 終話を確定する（endpoint_mode=client のときだけ）。
     finish_after_deferred_warmup_connect: bool,
-    /// 暖機の表示を、いつまで出しておくか。[`WARMUP_MIN_VISIBLE`] を参照。
-    warmup_visible_until: Option<Instant>,
+    /// 待受に入ってから 1 回は登録したか。**起動のたびに 1 回は必ず通す。**
+    warmed_since_listening: bool,
+    /// この発話は暖機に待たされたので、**貼り付けずクリップボードに置くだけ**にする。
+    ///
+    /// 暖機と接続で数秒かかることがあり、その間に利用者は別の窓へ移っている。
+    /// そこへ貼ると、貼りたくない場所へ文字が入る。取り消せないので、結果が
+    /// 遅れたときは自分で貼ってもらう。
+    hold_paste_after_warmup: bool,
+    /// 保留した発話で始めた接続が、まだ最初の応答を返していない。
+    ///
+    /// **待たせているあいだは、ひと続きの「準備中」として見せる。** 暖機が
+    /// 終わった瞬間に表示を落とすと、実際はまだ待たせているのに「認識中」に
+    /// 変わり、数秒後にまた「サーバーを起動しています」に変わる。1 つの状態が
+    /// 3 つの文言を行き来して見える。
+    warmup_until_response: Option<Instant>,
     /// サーバーが名乗った「認識器が寝るまでの時間」。
     /// 届いていなければ [`WARMUP_IDLE_THRESHOLD`] を使う。
     server_warmup_after: Option<Duration>,
@@ -572,7 +595,9 @@ impl Controller {
             last_successful_asr_response_at: None,
             deferred_speech: None,
             finish_after_deferred_warmup_connect: false,
-            warmup_visible_until: None,
+            warmed_since_listening: false,
+            hold_paste_after_warmup: false,
+            warmup_until_response: None,
             server_warmup_after: None,
             gate,
             preroll,
@@ -675,6 +700,9 @@ impl Controller {
                         Ok(ControllerCommand::Logout) => self.logout(),
                         Ok(ControllerCommand::UpdateSettings(settings)) => {
                             self.update_settings(*settings)
+                        }
+                        Ok(ControllerCommand::RefreshVoiceEnrollment) => {
+                            let _ = self.start_warmup(WarmupReason::VoiceChanged);
                         }
                         Ok(ControllerCommand::Shutdown) | Err(_) => {
                             shutting_down = true;
@@ -817,7 +845,6 @@ impl Controller {
         self.warmup_started_at = Some(started_at);
         self.warmup_reason = Some(reason);
         self.facts.warmup = Some(started_at);
-        self.warmup_visible_until = Some(started_at + WARMUP_MIN_VISIBLE);
         self.splash_started_at = None;
         self.refresh_overlay();
         tracing::info!(
@@ -1035,6 +1062,7 @@ impl Controller {
             return;
         };
         let DeferredSpeech {
+            preroll,
             audio: speech_audio,
             ended: speech_ended,
         } = deferred;
@@ -1045,7 +1073,10 @@ impl Controller {
             return;
         }
         self.finish_after_deferred_warmup_connect = speech_ended;
-        if let Err(error) = self.start_asr_after_speech_started(Vec::new(), speech_audio) {
+        // ここから最初の応答までは、暖機と地続きの「準備中」として見せる。
+        self.warmup_until_response = Some(self.warmup_started_at.unwrap_or_else(Instant::now));
+        self.hold_paste_after_warmup = true;
+        if let Err(error) = self.start_asr_after_speech_started(preroll, speech_audio) {
             if self.session.state() != SessionState::Disabled {
                 let message = error.to_string();
                 if is_user_action_failure_message(&message) {
@@ -1106,18 +1137,16 @@ impl Controller {
         }
     }
 
-    /// 終わった暖機を、最低表示時間のあいだだけ出し続ける。
-    /// 次に見せるものができたら譲る。
-    fn lingering_warmup_start(&mut self) -> Option<Instant> {
-        let until = self.warmup_visible_until?;
-        let nothing_better_to_show = self.facts.pending.is_empty()
-            && !matches!(self.facts.gate, GateState::Speaking)
-            && self.deferred_speech.is_none();
-        if Instant::now() >= until || !nothing_better_to_show {
-            self.warmup_visible_until = None;
+    /// 暖機のあと、保留した発話の最初の応答を待っているあいだ。
+    ///
+    /// 応答が来たか、待ちが無くなったら終わる。
+    fn waiting_after_warmup(&mut self) -> Option<Instant> {
+        let started_at = self.warmup_until_response?;
+        if self.facts.pending.is_empty() || self.facts.partial.is_some() {
+            self.warmup_until_response = None;
             return None;
         }
-        Some(until - WARMUP_MIN_VISIBLE)
+        Some(started_at)
     }
 
     fn is_warming_overlay(&self) -> bool {
@@ -1194,6 +1223,11 @@ impl Controller {
         self.require_connection();
     }
 
+    /// 待受を止めた。次に始めるときは、また 1 回は登録し直す。
+    fn forget_warmed_since_listening(&mut self) {
+        self.warmed_since_listening = false;
+    }
+
     fn enable_listening(&mut self) {
         if self.connection_needs_attention() {
             self.require_connection();
@@ -1214,12 +1248,24 @@ impl Controller {
             return;
         }
         self.send_ui(UiUpdate::State(SessionState::Listening));
-        // Disabled の間は warmup を開始しない。Listening へ遷移してからだけ、
-        // 初回 / idle 後の enrollment を先回りで試す。
+        // **待受に入ったら、まず 1 回は必ず登録する。**
+        //
+        // 待つ側の条件（recently_used）に任せると、一度も喋っていない起動直後は
+        // 暖機しない。すると最初の発話そのものが暖機の引き金になり、毎回
+        // 「まだ話さないでください」を挟むことになる。起動・方式の切り替え・
+        // 声の録り直しという**決まった時点で済ませておき**、無操作が続いた場合
+        // だけ、喋ったときにやり直す。
+        if !self.warmed_since_listening {
+            self.warmed_since_listening = true;
+            if self.start_warmup(WarmupReason::Startup) {
+                return;
+            }
+        }
         self.start_idle_warmup_if_due();
     }
 
     fn disable_listening(&mut self) {
+        self.forget_warmed_since_listening();
         // blocking enrollment は止められない場合がある。receiver を外し epoch を
         // 進めることで、Disabled になった後の結果を必ず捨てる。
         self.cancel_warmup();
@@ -1450,14 +1496,18 @@ impl Controller {
                 if self.warmup_in_progress {
                     // idle warmup と同時に話し始めた場合は結果を待つ。ただし
                     // RetryableRemote ならこの音声で接続を続けるため、入力は保持する。
-                    self.deferred_speech = Some(DeferredSpeech::default());
-                    self.preroll.clear();
+                    self.deferred_speech = Some(DeferredSpeech {
+                        preroll: self.preroll.take(),
+                        ..DeferredSpeech::default()
+                    });
                     tracing::debug!(target: "otoa_input", "speech deferred while warmup is running");
                     return;
                 }
                 if self.session.state() == SessionState::Listening && self.warmup_is_due() {
-                    self.deferred_speech = Some(DeferredSpeech::default());
-                    self.preroll.clear();
+                    self.deferred_speech = Some(DeferredSpeech {
+                        preroll: self.preroll.take(),
+                        ..DeferredSpeech::default()
+                    });
                     if self.start_warmup(WarmupReason::Idle) {
                         return;
                     }
@@ -2372,7 +2422,18 @@ impl Controller {
             return;
         }
         self.show_committed_text(text.clone());
-        if let Err(error) = self.text_out.emit(&text, PasteMethod::ClipboardAndPaste) {
+        // 暖機に待たされた発話は貼らない。待っているあいだに利用者は別の窓へ
+        // 移っていることがあり、そこへ貼ると取り消せない。
+        let method = if std::mem::take(&mut self.hold_paste_after_warmup) {
+            tracing::info!(
+                target: "otoa_input",
+                "暖機で待たせた発話なので、貼らずにクリップボードへ置いた"
+            );
+            PasteMethod::ClipboardOnly
+        } else {
+            PasteMethod::ClipboardAndPaste
+        };
+        if let Err(error) = self.text_out.emit(&text, method) {
             self.report_error(format!("failed to output transcript: {error:#}"));
         }
         // 利用者が体感する遅延。起点は「最後に確実に声だったフレーム」であって、
@@ -2619,12 +2680,10 @@ impl Controller {
         } else {
             GateState::Idle
         };
-        // **終わってもすぐには消さない。** 一瞬で終わる暖機を見えるようにする。
-        // ただし接続待ちや発話が始まっていれば、そちらの方が知りたい情報なので
-        // 即座に譲る。
+        // 暖機中と、そこから続く「最初の応答待ち」を、ひと続きで見せる。
         self.facts.warmup = match self.warmup_started_at {
             Some(started_at) if self.warmup_in_progress => Some(started_at),
-            _ => self.lingering_warmup_start(),
+            _ => self.waiting_after_warmup(),
         };
 
         self.facts.partial =
@@ -3403,23 +3462,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(controller.last_successful_asr_response_at.is_some());
 
-        // **終わった直後は、まだ出したままにする。** 実測 230〜750ms で終わる
-        // ので、すぐ消すと点滅すら見えず、待たされた理由が分からない。
-        controller.refresh_runtime_facts();
-        controller.render_overlay();
-        assert_eq!(
-            controller.overlay,
-            OverlayView::Shown {
-                kind: OverlayKind::WarmingUp,
-                committed: String::new(),
-                partial: String::new(),
-                error: String::new(),
-            },
-            "最低表示時間のあいだは出したままにする"
-        );
-
-        // 最低表示時間を過ぎたら消える。
-        controller.warmup_visible_until = Some(Instant::now() - Duration::from_millis(1));
+        // 待たせている発話が無ければ、終わったら消える。
         controller.refresh_runtime_facts();
         controller.render_overlay();
         assert_eq!(controller.overlay, OverlayView::Hidden);
@@ -3463,10 +3506,24 @@ mod tests {
         controller.last_confident_speech_at = Some(Instant::now());
         assert!(controller.session.apply(SessionInput::Enable));
         controller.last_successful_asr_response_at = Some(Instant::now() - WARMUP_IDLE_THRESHOLD);
+        // 喋り出しの前に溜まっている分。
+        controller.preroll.push(&[2_i16; 160]);
 
         controller.handle_gate_event(GateEvent::SpeechStarted);
         assert!(controller.warmup_in_progress, "暖機が始まっていない");
         assert!(controller.deferred_speech.is_some(), "発話を保留していない");
+
+        // **喋り出しの前の蓄えを預かること。** 落とすと、送られるのは語尾だけの
+        // 短い音声になり、話者照合のチャンクが足りずに弾かれる。
+        assert!(
+            !controller
+                .deferred_speech
+                .as_ref()
+                .expect("保留があること")
+                .preroll
+                .is_empty(),
+            "喋り出し前の音声を捨てている"
+        );
 
         // 暖機中に届いた音声は溜める。
         controller.handle_vad_samples(&[1_i16; 160]);
@@ -3490,6 +3547,97 @@ mod tests {
             SessionState::Listening,
             "暖機のあとに発話を送っていない（捨てられている）"
         );
+    }
+
+    /// **暖機に待たされた発話は貼らない。**
+    ///
+    /// 暖機と接続で数秒かかることがあり、その間に利用者は別の窓へ移っている。
+    /// そこへ貼ると、貼りたくない場所へ文字が入る。取り消せない。
+    #[test]
+    fn a_result_held_by_the_warmup_is_not_pasted() {
+        let (mut controller, _calls) = warmup_controller(Settings::default());
+        controller.last_confident_speech_at = Some(Instant::now());
+        assert!(controller.session.apply(SessionInput::Enable));
+        controller.last_successful_asr_response_at = Some(Instant::now() - WARMUP_IDLE_THRESHOLD);
+        controller.preroll.push(&[2_i16; 160]);
+
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        assert!(controller.deferred_speech.is_some());
+        wait_for_warmup(&mut controller);
+
+        assert!(
+            controller.hold_paste_after_warmup,
+            "待たせた発話に貼り付け保留の印が付いていない"
+        );
+    }
+
+    /// **待受に入ったら、まず 1 回は必ず登録する。**
+    ///
+    /// 待つ側の条件に任せると、一度も喋っていない起動直後は暖機しない。
+    /// すると最初の発話そのものが暖機の引き金になり、毎回「まだ話さないで
+    /// ください」を挟むことになる。
+    #[test]
+    fn listening_always_enrolls_once_before_the_first_speech() {
+        let (mut controller, calls) = warmup_controller(Settings::default());
+        // 一度も喋っていない＝ recently_used() は false。それでも暖機すること。
+        assert!(controller.last_confident_speech_at.is_none());
+
+        controller.enable_listening();
+
+        assert!(controller.warmup_in_progress, "起動直後に登録していない");
+        assert!(matches!(
+            controller.warmup_reason,
+            Some(WarmupReason::Startup)
+        ));
+        wait_for_warmup(&mut controller);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // 2 回目の待受開始では繰り返さない（無操作の暖機に任せる）。
+        controller.enable_listening();
+        assert!(
+            !controller.warmup_in_progress,
+            "同じ待受で二重に暖機している"
+        );
+
+        // 待受を止めたら、次に始めるときはまた 1 回通す。
+        controller.disable_listening();
+        controller.enable_listening();
+        assert!(
+            controller.warmup_in_progress,
+            "止めた後に登録し直していない"
+        );
+    }
+
+    /// **声を録り直したら、その場で登録し直す。**
+    ///
+    /// 録り直しは設定を変えないので、接続先が変わったことにはならない。
+    /// 次の無操作まで待つと、そのあいだサーバーは古い声で照合し続ける。
+    ///
+    /// 登録の道は暖機 1 本にまとめてある。呼ぶ側が自分で資格情報を取り直して
+    /// 送ると、同じことをする道が 2 つになり、片方だけ画面に出ない。
+    #[test]
+    fn a_re_recorded_voice_is_enrolled_through_the_same_warmup() {
+        let (mut controller, calls) = warmup_controller(Settings::default());
+
+        assert!(controller.start_warmup(WarmupReason::VoiceChanged));
+
+        assert!(controller.warmup_in_progress);
+        assert!(matches!(
+            controller.warmup_reason,
+            Some(WarmupReason::VoiceChanged)
+        ));
+        // **画面に出ること。** 無表示で登録すると、待たされている理由が
+        // 利用者に分からない。
+        assert!(matches!(
+            controller.overlay,
+            OverlayView::Shown {
+                kind: OverlayKind::WarmingUp,
+                ..
+            }
+        ));
+
+        wait_for_warmup(&mut controller);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "登録を送っていない");
     }
 
     /// 暖機の間隔は、サーバーが名乗ったならそれに従う。
