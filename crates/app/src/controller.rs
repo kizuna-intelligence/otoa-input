@@ -28,12 +28,8 @@ const OVERLAY_ERROR_DURATION: Duration = Duration::from_secs(8);
 const OVERLAY_NOTICE_DURATION: Duration = Duration::from_secs(3);
 /// 通常応答の実機中央値は 2.58 秒。通常時に待機表示を出さない余裕として 4.0 秒にする。
 const SERVER_RESPONSE_WAITING_OVERLAY_DELAY: Duration = Duration::from_secs(4);
-/// 接続処理そのものが長引いたときだけ、サーバー起動待ちとして見せる。
-const CONNECTING_STARTING_OVERLAY_DELAY: Duration = Duration::from_secs(4);
-/// コールドスタートは実測 16〜64 秒なので、最初の応答には十分な猶予を持たせる。
-const SERVER_FIRST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(75);
-/// 途中結果が止まった後は、接続を無期限に保持しない。
-const SERVER_FINAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+/// コールドスタートは実測 16〜64 秒。早期に起動待ちを伝えるため、10.0 秒で切り替える。
+const SERVER_RESPONSE_STARTING_OVERLAY_DELAY: Duration = Duration::from_secs(10);
 const FAILED_RETRY_INITIAL: Duration = Duration::from_secs(5);
 const FAILED_RETRY_MAX: Duration = Duration::from_secs(30);
 /// enrollment のリモート失敗は、100 ms tick ごとに再試行せず最低 5 秒待つ。
@@ -178,37 +174,14 @@ enum GateState {
     Speaking,
 }
 
-/// 一つの server turn で観測済みの応答相。
+/// 端末の VAD が無音を検知してから、サーバーの確定応答を待っている発話。
 ///
-/// `Completed` は server endpoint が端末 VAD の `SpeechEnded` より先に来た事実を
-/// bool を足さずに保持するために必要である。次の `SpeechStarted` だけが `Idle` へ戻す。
+/// 第1段では既存挙動を保つため常に高々一件だけを入れる。第3段で
+/// `SpeechStarted` ごとの世代と複数待機へ切り替える。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServerTurn {
-    Idle,
-    AwaitingFirstResponse { since: Instant },
-    Receiving { last_activity_at: Instant },
-    Completed,
-}
-
-impl ServerTurn {
-    fn blocks_idle_close(self, now: Instant) -> bool {
-        match self {
-            Self::AwaitingFirstResponse { since } => {
-                now.saturating_duration_since(since) < SERVER_FIRST_RESPONSE_TIMEOUT
-            }
-            Self::Receiving { last_activity_at } => {
-                now.saturating_duration_since(last_activity_at) < SERVER_FINAL_RESPONSE_TIMEOUT
-            }
-            Self::Idle | Self::Completed => false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ServerActivity {
-    Response,
-    Completed,
-    Ended,
+struct Wait {
+    epoch: u64,
+    started_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +211,8 @@ struct Facts {
     session: SessionState,
     gate: GateState,
     warmup: Option<Instant>,
+    /// 第1段では旧来どおり一件だけ。第3段で FIFO として有効化する。
+    pending: VecDeque<Wait>,
     commit: Option<(String, Instant)>,
     notice: Option<Notice>,
     error: Option<UserError>,
@@ -247,14 +222,9 @@ struct Facts {
     finalizing: bool,
 }
 
-/// `Facts` と session に属する時刻・turn からオーバーレイを導出する。副作用を持たない。
+/// `Facts` だけからオーバーレイを導出する。副作用を持たない。
 ///
-fn view(
-    facts: &Facts,
-    server_turn: ServerTurn,
-    connecting_started_at: Option<Instant>,
-    now: Instant,
-) -> OverlayView {
+fn view(facts: &Facts, now: Instant) -> OverlayView {
     match facts.error.as_ref() {
         Some(UserError::Temporary { message, until }) if now < *until => {
             return OverlayView::Shown {
@@ -298,20 +268,14 @@ fn view(
         return blank_overlay(OverlayKind::WarmingUp);
     }
 
-    if facts.session == SessionState::Connecting
-        && connecting_started_at.is_some_and(|started_at| {
-            now.saturating_duration_since(started_at) >= CONNECTING_STARTING_OVERLAY_DELAY
-        })
-    {
-        return blank_overlay(OverlayKind::StartingServer);
-    }
-
-    if matches!(
-        server_turn,
-        ServerTurn::AwaitingFirstResponse { since }
-            if now.saturating_duration_since(since) >= SERVER_RESPONSE_WAITING_OVERLAY_DELAY
-    ) {
-        return blank_overlay(OverlayKind::WaitingForResponse);
+    if let Some(wait) = facts.pending.front() {
+        let elapsed = now.saturating_duration_since(wait.started_at);
+        if elapsed >= SERVER_RESPONSE_STARTING_OVERLAY_DELAY {
+            return blank_overlay(OverlayKind::StartingServer);
+        }
+        if elapsed >= SERVER_RESPONSE_WAITING_OVERLAY_DELAY {
+            return blank_overlay(OverlayKind::WaitingForResponse);
+        }
     }
 
     if let Some(partial) = facts.partial.as_ref().filter(|partial| !partial.is_empty()) {
@@ -325,10 +289,6 @@ fn view(
 
     if facts.finalizing {
         return blank_overlay(OverlayKind::Finalizing);
-    }
-
-    if matches!(server_turn, ServerTurn::Receiving { .. }) {
-        return blank_overlay(OverlayKind::Recognizing);
     }
 
     if facts.gate == GateState::Speaking {
@@ -429,8 +389,8 @@ pub struct Controller {
     pub(crate) to_ui: Sender<UiUpdate>,
     pub(crate) text_out: TextOutput,
     facts: Facts,
-    /// server endpoint mode の一つの論理 turn。応答待ちの時刻もこの相が所有する。
-    server_turn: ServerTurn,
+    /// `SpeechStarted` ごとの通し番号。応答順を待機 FIFO と対応付けるために記録する。
+    epoch: u64,
     /// 前回描画した値。表示理由は保持せず、Facts から導出した結果の重複送信を抑える。
     overlay: OverlayView,
     /// 第1・第2段のテストが直接観測している期限。製品の表示状態には使わない。
@@ -499,6 +459,13 @@ pub struct Controller {
     /// endpoint_mode=client のとき、finalize を送ってから次の発話開始までの抑止。
     /// これが無いと SpeechEnded のたびに finalize を送り、同じ貼り付けを繰り返す。
     client_finalize_sent: bool,
+    /// endpoint_mode=server のとき、`<end>` を受けてから次の発話開始までの抑止。
+    /// 第1・第2段のテストが直接観測している単一待機。製品コードは `Facts.pending`
+    /// の FIFO だけを使う。
+    #[cfg(test)]
+    server_response_wait_started_at: Option<Instant>,
+    #[cfg(test)]
+    server_response_wait_overlay_visible: bool,
     /// サーバーが `<end>` を返し、かつ端末側でも発話中でない間は、無音を
     /// 同じストリームへ送り続けない。次の発話に備えてプリロールだけ保つ。
     server_audio_paused: bool,
@@ -515,6 +482,13 @@ pub struct Controller {
     /// 2026-08-25、この起点で測らなかったために報告値(2.0 秒)と体感(4 秒)が
     /// 食い違い続けた。
     last_confident_speech_at: Option<Instant>,
+    /// `FinalText` と直後の `<end>` / `<fin>` は同じ応答フレームから分解された
+    /// イベントである。前者で FIFO を進めた後、後者が次の待機を二重に pop しない
+    /// ようにする。
+    pending_completed_by_final_text: bool,
+    /// `<end>` の直後に届く通知は同じ応答に属する。次の待機を消さないための一回限り
+    /// の抑止で、次の通常応答が始まれば解除する。
+    pending_completed_by_endpoint: bool,
     /// Failed に入った時刻。自動復帰対象でない失敗では使わない。
     failed_at: Option<Instant>,
     /// Failed からの自動復帰を許可するか。
@@ -595,13 +569,14 @@ impl Controller {
                 session: SessionState::Disabled,
                 gate: GateState::Idle,
                 warmup: None,
+                pending: VecDeque::new(),
                 commit: None,
                 notice: None,
                 error: None,
                 partial: None,
                 finalizing: false,
             },
-            server_turn: ServerTurn::Idle,
+            epoch: 0,
             // 起動直後はロゴを見せる。main の既定に合わせる。
             overlay: OverlayView::Splash,
             #[cfg(test)]
@@ -633,10 +608,16 @@ impl Controller {
             sent_audio_ms: 0,
             asr_closing: false,
             client_finalize_sent: false,
+            #[cfg(test)]
+            server_response_wait_started_at: None,
+            #[cfg(test)]
+            server_response_wait_overlay_visible: false,
             server_audio_paused: false,
             pause_when_gate_stops: false,
             finalize_pending: false,
             last_confident_speech_at: None,
+            pending_completed_by_final_text: false,
+            pending_completed_by_endpoint: false,
             failed_at: None,
             failed_recovery_enabled: false,
             failed_retry_delay: FAILED_RETRY_INITIAL,
@@ -1161,9 +1142,7 @@ impl Controller {
     /// 応答が来たか、待ちが無くなったら終わる。
     fn waiting_after_warmup(&mut self) -> Option<Instant> {
         let started_at = self.warmup_until_response?;
-        if !matches!(self.server_turn, ServerTurn::AwaitingFirstResponse { .. })
-            || self.facts.partial.is_some()
-        {
+        if self.facts.pending.is_empty() || self.facts.partial.is_some() {
             self.warmup_until_response = None;
             return None;
         }
@@ -1295,7 +1274,7 @@ impl Controller {
         self.gate.reset();
         self.preroll.clear();
         self.level_clip_window.clear();
-        self.clear_server_turn("listening disabled");
+        self.clear_pending_waits("listening disabled");
 
         match self.session.state() {
             SessionState::Listening => {
@@ -1505,17 +1484,13 @@ impl Controller {
         match event {
             GateEvent::SpeechStarted => {
                 tracing::debug!(target: "otoa_input", "gate: speech started");
+                self.epoch = self.epoch.wrapping_add(1);
                 self.facts.gate = GateState::Speaking;
                 self.client_finalize_sent = false;
-                if self.session.state() == SessionState::Streaming
-                    && self.server_turn == ServerTurn::Completed
-                {
-                    self.server_turn = ServerTurn::Idle;
-                }
                 // 利用者が次を喋り始めていても、届いていない応答は前の発話の
                 // ものでありうる。サーバーが実際に答えるか、セッションが終わる
                 // まで、その待ちを消さない。
-                self.log_server_turn_kept("next speech started");
+                self.log_server_response_wait_kept("next speech started");
                 self.clear_commit_hold();
                 self.clear_overlay_notice();
                 if self.warmup_in_progress {
@@ -1755,7 +1730,6 @@ impl Controller {
     }
 
     fn start_asr(&mut self, preroll: Vec<i16>) -> anyhow::Result<()> {
-        self.clear_server_turn("ASR connection started");
         self.server_audio_paused = false;
         self.pause_when_gate_stops = false;
         let endpoint = self.provider.endpoint(&self.settings.core)?;
@@ -1848,33 +1822,41 @@ impl Controller {
     }
 
     fn start_server_response_wait(&mut self) {
-        if self.session.state() != SessionState::Streaming {
+        if !self.facts.pending.is_empty() {
             return;
         }
-        match self.server_turn {
-            ServerTurn::Idle => {
-                self.server_turn = ServerTurn::AwaitingFirstResponse {
-                    since: Instant::now(),
-                };
-                tracing::debug!(target: "otoa_input", "サーバーの最初の応答を待ち始めた");
-            }
-            ServerTurn::AwaitingFirstResponse { .. }
-            | ServerTurn::Receiving { .. }
-            | ServerTurn::Completed => self.log_server_turn_kept("local speech ended"),
-        }
+        let wait = Wait {
+            epoch: self.epoch,
+            started_at: Instant::now(),
+        };
+        self.facts.pending.push_back(wait);
+        self.sync_pending_wait_observer();
+        tracing::debug!(
+            target: "otoa_input",
+            epoch = wait.epoch,
+            pending = self.facts.pending.len(),
+            "サーバー応答待ちを積んだ"
+        );
     }
 
     /// 発話が次へ進んでも、既に表示しているサーバー応答待ちを保持したことを記録する。
     /// gate event ごとに高頻度で出るものではないため、再表示・タイマー再始動の抑制を
     /// 実機ログから追える。
-    fn log_server_turn_kept(&self, reason: &'static str) {
-        let (phase, elapsed) = match self.server_turn {
-            ServerTurn::AwaitingFirstResponse { since } => ("awaiting-first", since.elapsed()),
-            ServerTurn::Receiving { last_activity_at } => ("receiving", last_activity_at.elapsed()),
-            ServerTurn::Idle | ServerTurn::Completed => return,
+    fn log_server_response_wait_kept(&self, reason: &'static str) {
+        let Some(wait) = self.facts.pending.front() else {
+            return;
+        };
+        let elapsed = wait.started_at.elapsed();
+        let phase = if elapsed >= SERVER_RESPONSE_STARTING_OVERLAY_DELAY {
+            "server-starting"
+        } else if elapsed >= SERVER_RESPONSE_WAITING_OVERLAY_DELAY {
+            "recognizing"
+        } else {
+            "pending"
         };
         tracing::info!(
             target: "otoa_input",
+            epoch = wait.epoch,
             elapsed_ms = elapsed.as_millis() as u64,
             phase,
             reason,
@@ -1882,44 +1864,80 @@ impl Controller {
         );
     }
 
-    /// 応答イベントを一つの入口で server turn の相へ反映する。
-    fn observe_server_activity(&mut self, activity: ServerActivity, reason: &'static str) {
-        if self.session.state() != SessionState::Streaming {
-            self.server_turn = ServerTurn::Idle;
-            return;
-        }
-        let previous = self.server_turn;
-        self.server_turn = match activity {
-            // Completed は次の SpeechStarted まで吸収相にする。サーバー終話が端末
-            // 終話より先に来たあと、同じ応答の文字イベントで待ちを再開しない。
-            ServerActivity::Response if previous == ServerTurn::Completed => previous,
-            ServerActivity::Response => ServerTurn::Receiving {
-                last_activity_at: Instant::now(),
-            },
-            ServerActivity::Completed => ServerTurn::Completed,
-            ServerActivity::Ended => ServerTurn::Idle,
+    /// 確定応答が来たので待ちを解く。**行列を空にする**(1 対 1 ではないため)。
+    fn complete_pending_wait(&mut self, reason: &'static str) -> bool {
+        let Some(wait) = self.facts.pending.pop_front() else {
+            self.sync_pending_wait_observer();
+            return false;
         };
+        self.facts.pending.clear();
         tracing::debug!(
             target: "otoa_input",
-            from = ?previous,
-            to = ?self.server_turn,
+            epoch = wait.epoch,
+            elapsed_ms = wait.started_at.elapsed().as_millis() as u64,
+            remaining = 0,
             reason,
-            "server activity"
+            "サーバー応答待ちが解けた"
         );
+        self.sync_pending_wait_observer();
+        true
     }
 
-    /// セッションの終了・切断時には、対応先を失った turn を取り除く。
-    fn clear_server_turn(&mut self, reason: &'static str) {
-        if self.server_turn != ServerTurn::Idle {
-            tracing::debug!(target: "otoa_input", turn = ?self.server_turn, reason, "server turn cleared");
+    /// セッションの終了・切断時には、対応先を失った待機をすべて取り除く。
+    fn clear_pending_waits(&mut self, reason: &'static str) {
+        if !self.facts.pending.is_empty() {
+            tracing::debug!(
+                target: "otoa_input",
+                pending = self.facts.pending.len(),
+                reason,
+                "サーバー応答待ちを空にした"
+            );
         }
-        self.server_turn = ServerTurn::Idle;
+        self.facts.pending.clear();
+        self.pending_completed_by_final_text = false;
+        self.pending_completed_by_endpoint = false;
+        self.sync_pending_wait_observer();
     }
 
     /// 100 ms tick と既存テストからの明示的な再評価口。表示の選択は `view` だけが行う。
-    fn check_server_turn_overlay(&mut self) {
+    fn check_server_response_wait_overlay(&mut self) {
+        self.import_pending_wait_override_for_test();
         self.render_overlay();
+        self.sync_pending_wait_observer();
     }
+
+    #[cfg(test)]
+    fn import_pending_wait_override_for_test(&mut self) {
+        let Some(started_at) = self.server_response_wait_started_at else {
+            return;
+        };
+        match self.facts.pending.front_mut() {
+            Some(wait) => wait.started_at = started_at,
+            None => self.facts.pending.push_back(Wait {
+                epoch: self.epoch,
+                started_at,
+            }),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn import_pending_wait_override_for_test(&mut self) {}
+
+    #[cfg(test)]
+    fn sync_pending_wait_observer(&mut self) {
+        self.server_response_wait_started_at =
+            self.facts.pending.front().map(|wait| wait.started_at);
+        self.server_response_wait_overlay_visible = matches!(
+            view(&self.facts, Instant::now()),
+            OverlayView::Shown {
+                kind: OverlayKind::WaitingForResponse | OverlayKind::StartingServer,
+                ..
+            }
+        );
+    }
+
+    #[cfg(not(test))]
+    fn sync_pending_wait_observer(&mut self) {}
 
     fn send_stop(&mut self) {
         if let Some(to_asr) = self.to_asr.clone() {
@@ -2036,13 +2054,18 @@ impl Controller {
                     );
                     return;
                 }
-                // FinalText はそれ自体がサーバーからの応答である。終話の印を
-                // 待つ間は Receiving とし、最初の応答待ちを残さない。
-                self.observe_server_activity(ServerActivity::Response, "final transcript received");
+                // FinalText はそれ自体がサーバーからの確定応答である。終話の
+                // 印を待つ間、応答待ちの表示を残したままにしない。
+                self.pending_completed_by_endpoint = false;
+                self.pending_completed_by_final_text =
+                    self.complete_pending_wait("final transcript received");
                 self.transcript.push_final(&tokens_to_text(&tokens));
                 self.send_text_update(true);
             }
             AsrEvent::PartialText(tokens) => {
+                // `<end>` の直後の notice だけを抑止する。次の通常応答は必ず
+                // partial（空でもよい）を含むので、ここで次の応答へ進める。
+                self.pending_completed_by_endpoint = false;
                 if self.client_finalize_sent && !self.gate.is_speaking() {
                     tracing::debug!(
                         target: "otoa_input",
@@ -2050,17 +2073,19 @@ impl Controller {
                     );
                     return;
                 }
-                self.observe_server_activity(
-                    ServerActivity::Response,
-                    "partial transcript received",
-                );
                 let text = tokens_to_text(&tokens);
                 let had_commit_hold = !text.is_empty() && self.clear_commit_hold();
                 self.transcript.replace_partial(&text);
                 self.send_text_update(had_commit_hold);
             }
             AsrEvent::Endpoint => {
-                self.observe_server_activity(ServerActivity::Completed, "endpoint received");
+                if self.pending_completed_by_final_text {
+                    self.pending_completed_by_final_text = false;
+                    self.pending_completed_by_endpoint = true;
+                } else {
+                    self.pending_completed_by_endpoint =
+                        self.complete_pending_wait("endpoint received");
+                }
                 self.finalize_pending = false;
                 self.last_speech_endpoint_at = Some(Instant::now());
                 if self.settings.endpoint_mode == "server" && self.gate.is_speaking() {
@@ -2085,10 +2110,11 @@ impl Controller {
                 }
             }
             AsrEvent::FinalizeDone => {
-                self.observe_server_activity(
-                    ServerActivity::Completed,
-                    "finalize response received",
-                );
+                if self.pending_completed_by_final_text {
+                    self.pending_completed_by_final_text = false;
+                } else {
+                    self.complete_pending_wait("finalize response received");
+                }
                 // endpoint_mode=client では <end> が来ないので、ここで区切り時刻を更新する。
                 // 更新しないと last_speech_endpoint_at が発話開始のまま止まり、
                 // idle_close_sec を過ぎた後は毎周期 finalize を送り続ける。
@@ -2102,7 +2128,7 @@ impl Controller {
                 }
             }
             AsrEvent::Finished => {
-                self.observe_server_activity(ServerActivity::Ended, "session finished");
+                self.clear_pending_waits("session finished");
                 self.finalize_pending = false;
                 self.asr_closing = true;
                 self.log_session_event("Finished");
@@ -2147,7 +2173,7 @@ impl Controller {
                 }
             }
             AsrEvent::Closed { code, reason } => {
-                self.observe_server_activity(ServerActivity::Ended, "ASR WebSocket closed");
+                self.complete_pending_wait("ASR WebSocket closed");
                 if code == Some(POLICY_VIOLATION_CLOSE_CODE) {
                     let message = if reason.is_empty() {
                         "音声認識サービスへの接続が拒否されました".to_string()
@@ -2177,11 +2203,15 @@ impl Controller {
                 self.server_warmup_after = Some(after);
             }
             AsrEvent::Notice { code, message } => {
-                self.observe_server_activity(ServerActivity::Completed, "notice received");
-                self.show_overlay_notice(code, message);
+                if self.pending_completed_by_endpoint {
+                    self.pending_completed_by_endpoint = false;
+                    self.show_overlay_notice_after_response(code, message);
+                } else {
+                    self.show_overlay_notice(code, message);
+                }
             }
             AsrEvent::Failed(error) => {
-                self.observe_server_activity(ServerActivity::Ended, "ASR error received");
+                self.complete_pending_wait("ASR error received");
                 if is_nonfatal_asr_error(&error) {
                     if self.asr_closing || self.session.state() == SessionState::Closing {
                         tracing::debug!("ASR connection closed during normal shutdown: {error}");
@@ -2268,12 +2298,12 @@ impl Controller {
         self.check_splash_timeout();
         self.check_overlay_timeout();
         self.check_commit_hold_timeout();
-        self.check_server_turn_overlay();
+        self.check_server_response_wait_overlay();
         self.start_idle_warmup_if_due();
         if !idle_close_is_due(
             self.session.state(),
             self.gate.is_speaking(),
-            self.server_turn,
+            !self.facts.pending.is_empty(),
             self.last_speech_endpoint_at,
             self.settings.idle_close_sec,
             Instant::now(),
@@ -2555,6 +2585,11 @@ impl Controller {
     }
 
     fn show_overlay_notice(&mut self, code: String, message: String) {
+        self.complete_pending_wait("notice received");
+        self.show_overlay_notice_after_response(code, message);
+    }
+
+    fn show_overlay_notice_after_response(&mut self, code: String, message: String) {
         let message = self.sanitize_message(message);
         let until = Instant::now() + OVERLAY_NOTICE_DURATION;
         self.splash_started_at = None;
@@ -2570,7 +2605,7 @@ impl Controller {
     }
 
     fn show_persistent_overlay_error(&mut self, message: String) {
-        self.clear_server_turn("persistent error shown");
+        self.clear_pending_waits("persistent error shown");
         self.splash_started_at = None;
         self.facts.notice = None;
         self.facts.error = Some(UserError::Persistent {
@@ -2658,13 +2693,9 @@ impl Controller {
 
     fn render_overlay(&mut self) {
         self.refresh_runtime_facts();
-        self.set_overlay(view(
-            &self.facts,
-            self.server_turn,
-            self.connecting_started_at,
-            Instant::now(),
-        ));
+        self.set_overlay(view(&self.facts, Instant::now()));
         self.sync_display_deadline_observer();
+        self.sync_pending_wait_observer();
     }
 
     #[cfg(test)]
@@ -2891,7 +2922,7 @@ impl Controller {
     }
 
     fn cleanup_asr(&mut self) {
-        self.clear_server_turn("ASR session cleaned up");
+        self.clear_pending_waits("ASR session cleaned up");
         self.finalize_pending = false;
         self.client_finalize_sent = false;
         self.server_audio_paused = false;
@@ -2938,22 +2969,22 @@ fn failed_retry_is_due(failed_at: Instant, retry_delay: Duration, now: Instant) 
 
 /// 無音が続いたので接続を閉じてよいか。
 ///
-/// **応答をまだ待っている間は、turn の期限までは閉じない。** 2026-08-25 の実機で、喋り終わってから
+/// **応答をまだ待っている間は閉じない。** 2026-08-25 の実機で、喋り終わってから
 /// 15 秒(`idle_close_sec` の既定)でセッションを閉じてしまい、背後の
 /// コールドスタート(30〜60 秒)が終わる前に諦めていた。閉じることすら
 /// 完了せず `closing timed out without finished` になり、未応答の待ちが
-/// 破棄されていた。その猶予は残しつつ、無応答なら期限後に閉じられるようにする。
+/// 破棄されていた。待ちが残っている限り、この経路で閉じてはならない。
 fn idle_close_is_due(
     state: SessionState,
     gate_is_speaking: bool,
-    server_turn: ServerTurn,
+    has_pending_response: bool,
     last_speech_endpoint_at: Option<Instant>,
     idle_close_sec: u32,
     now: Instant,
 ) -> bool {
     state == SessionState::Streaming
         && !gate_is_speaking
-        && !server_turn.blocks_idle_close(now)
+        && !has_pending_response
         && last_speech_endpoint_at.is_some_and(|last_endpoint| {
             now.duration_since(last_endpoint) > Duration::from_secs(u64::from(idle_close_sec))
         })
@@ -3088,11 +3119,10 @@ mod tests {
         apply_input_gain, combine_readiness, failed_retry_is_due, gate_from_settings,
         idle_close_is_due, is_loopback_host, is_nonfatal_asr_error, is_user_action_failure_message,
         level_status, next_enroll_retry_delay, next_failed_retry_delay, resolve_paste_shortcut,
-        Controller, LevelStatus, OverlayKind, OverlayView, ServerActivity, ServerTurn,
-        WarmupReason, WarmupResult, CONNECTING_STARTING_OVERLAY_DELAY, ENROLL_RETRY_INITIAL,
-        ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX, GATEWAY_URL_MISSING_MESSAGE,
-        OVERLAY_NOTICE_DURATION, PENDING_AUDIO_LIMIT, SERVER_FINAL_RESPONSE_TIMEOUT,
-        SERVER_FIRST_RESPONSE_TIMEOUT, SERVER_RESPONSE_WAITING_OVERLAY_DELAY,
+        Controller, LevelStatus, OverlayKind, OverlayView, WarmupReason, WarmupResult,
+        ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
+        GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION, PENDING_AUDIO_LIMIT,
+        SERVER_RESPONSE_STARTING_OVERLAY_DELAY, SERVER_RESPONSE_WAITING_OVERLAY_DELAY,
         WARMUP_IDLE_THRESHOLD,
     };
     use crate::connection::SelfHostedProvider;
@@ -3894,18 +3924,14 @@ mod tests {
         controller.handle_gate_event(GateEvent::SpeechEnded);
     }
 
-    fn age_server_turn(controller: &mut Controller, elapsed: Duration) {
-        controller.server_turn = match controller.server_turn {
-            ServerTurn::AwaitingFirstResponse { .. } => ServerTurn::AwaitingFirstResponse {
-                since: Instant::now() - elapsed,
-            },
-            ServerTurn::Receiving { .. } => ServerTurn::Receiving {
-                last_activity_at: Instant::now() - elapsed,
-            },
-            ServerTurn::Idle | ServerTurn::Completed => {
-                panic!("応答待ちまたは受信中であるはず")
-            }
-        };
+    fn age_oldest_pending_wait(controller: &mut Controller, elapsed: Duration) {
+        controller
+            .facts
+            .pending
+            .front_mut()
+            .expect("無音の検知で応答待ちが積まれるはず")
+            .started_at = Instant::now() - elapsed;
+        controller.sync_pending_wait_observer();
     }
 
     fn committed_overlay(controller: &Controller) -> (&str, &str) {
@@ -4305,27 +4331,27 @@ mod tests {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(&mut controller, Duration::from_millis(2_580));
-        controller.check_server_turn_overlay();
+        age_oldest_pending_wait(&mut controller, Duration::from_millis(2_580));
+        controller.check_server_response_wait_overlay();
 
         assert_eq!(controller.overlay, OverlayView::Hidden);
     }
 
     #[test]
-    fn awaiting_first_response_never_becomes_starting_server() {
+    fn pending_wait_changes_at_four_and_ten_seconds() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
-        controller.check_server_turn_overlay();
+        age_oldest_pending_wait(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
         assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
@@ -4334,43 +4360,42 @@ mod tests {
             }
         ));
 
-        age_server_turn(&mut controller, Duration::from_secs(10));
-        controller.check_server_turn_overlay();
+        age_oldest_pending_wait(&mut controller, SERVER_RESPONSE_STARTING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
         assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
-                kind: OverlayKind::WaitingForResponse,
+                kind: OverlayKind::StartingServer,
                 ..
             }
         ));
     }
 
     #[test]
-    fn awaiting_first_response_is_not_rewound_by_more_local_speech() {
+    fn pending_wait_is_not_rewound_when_the_next_speech_starts() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
-        let ServerTurn::AwaitingFirstResponse {
-            since: first_started_at,
-        } = controller.server_turn
-        else {
-            panic!("最初の応答待ちであるはず");
-        };
-        controller.check_server_turn_overlay();
+        age_oldest_pending_wait(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        let first_started_at = controller
+            .facts
+            .pending
+            .front()
+            .expect("first wait")
+            .started_at;
+        controller.check_server_response_wait_overlay();
 
         assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
         controller.handle_gate_event(GateEvent::SpeechStarted);
+        assert_eq!(controller.facts.pending.len(), 1);
         assert_eq!(
-            controller.server_turn,
-            ServerTurn::AwaitingFirstResponse {
-                since: first_started_at
-            }
+            controller.facts.pending.front().unwrap().started_at,
+            first_started_at
         );
         assert!(matches!(
             controller.overlay,
@@ -4382,16 +4407,15 @@ mod tests {
 
         end_speech(&mut controller);
         // 積み増さない。開始時刻は「待っていない状態から最初に送った時刻」を保つ。
+        assert_eq!(controller.facts.pending.len(), 1);
         assert_eq!(
-            controller.server_turn,
-            ServerTurn::AwaitingFirstResponse {
-                since: first_started_at
-            }
+            controller.facts.pending.front().unwrap().started_at,
+            first_started_at
         );
     }
 
     #[test]
-    fn one_server_turn_does_not_grow_with_local_vad_segments() {
+    fn old_response_cannot_pop_the_newer_speech_wait_or_hide_its_overlay() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.auto_paste = false;
@@ -4399,28 +4423,28 @@ mod tests {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        let first_turn = controller.server_turn;
+        let first_epoch = controller.facts.pending.front().expect("first wait").epoch;
 
         assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
         controller.handle_gate_event(GateEvent::SpeechStarted);
         end_speech(&mut controller);
-        let second_turn = controller.server_turn;
+        let second_epoch = controller.facts.pending.front().expect("second wait").epoch;
 
         assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
         controller.handle_gate_event(GateEvent::SpeechStarted);
         controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("古い結果", true)]));
         controller.handle_asr_event(AsrEvent::Endpoint);
 
-        // 2026-08-25: 待ちは常に一つの turn である。端末の VAD が無音を検知しても
+        // 2026-08-25: 待ちは常に最大 1 件である。端末の VAD が無音を検知しても
         // サーバーは終話と判断したときだけ返すので、複数回の検知が 1 つの応答に
         // まとめられる。1 対 1 に数えると行列が伸び続け、先頭が古いまま残って
-        // 待ち表示が消えなくなる(実機で発生)。したがって 2 回目以降も同じ相を保ち、
-        // 応答が来れば Completed にする。
-        assert_eq!(first_turn, second_turn);
-        assert_eq!(controller.server_turn, ServerTurn::Completed);
+        // 待ち表示が消えなくなる(実機で発生)。したがって 2 回目以降は積み増さず、
+        // 応答が来れば空にする。
+        assert_eq!(first_epoch, second_epoch);
+        assert!(controller.facts.pending.is_empty());
         assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
@@ -4431,17 +4455,18 @@ mod tests {
     }
 
     #[test]
-    fn awaiting_first_response_shows_waiting_after_its_display_delay() {
+    fn server_wait_shows_recognizing_after_one_and_a_half_seconds() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
-        controller.check_server_turn_overlay();
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
 
         assert_eq!(
             controller.overlay,
@@ -4452,20 +4477,25 @@ mod tests {
                 error: String::new(),
             }
         );
+        assert!(controller.server_response_wait_overlay_visible);
     }
 
     #[test]
-    fn connecting_alone_can_derive_starting_server() {
+    fn server_wait_changes_to_starting_server_after_six_and_a_half_seconds() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let mut controller = test_controller(settings);
-        assert!(controller.session.apply(SessionInput::Enable));
-        assert!(controller.session.apply(SessionInput::SpeechStarted));
-        controller.connecting_started_at = Some(Instant::now() - CONNECTING_STARTING_OVERLAY_DELAY);
-        controller.refresh_overlay();
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_STARTING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
 
         assert!(matches!(
             controller.overlay,
@@ -4474,29 +4504,27 @@ mod tests {
                 ..
             }
         ));
+        assert!(controller.server_response_wait_overlay_visible);
     }
 
     #[test]
-    fn awaiting_first_response_keeps_its_start_time_during_the_next_speech() {
+    fn server_wait_stays_visible_and_keeps_its_start_time_during_the_next_speech() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
         let started_at = Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY;
-        controller.server_turn = ServerTurn::AwaitingFirstResponse { since: started_at };
-        controller.check_server_turn_overlay();
+        controller.server_response_wait_started_at = Some(started_at);
+        controller.check_server_response_wait_overlay();
 
         assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
         controller.handle_gate_event(GateEvent::SpeechStarted);
 
-        assert_eq!(
-            controller.server_turn,
-            ServerTurn::AwaitingFirstResponse { since: started_at }
-        );
+        assert_eq!(controller.server_response_wait_started_at, Some(started_at));
         assert_eq!(
             controller.overlay,
             OverlayView::Shown {
@@ -4508,36 +4536,30 @@ mod tests {
         );
 
         end_speech(&mut controller);
-        assert_eq!(
-            controller.server_turn,
-            ServerTurn::AwaitingFirstResponse { since: started_at }
-        );
+        assert_eq!(controller.server_response_wait_started_at, Some(started_at));
     }
 
     #[test]
-    fn streaming_wait_never_derives_starting_server() {
+    fn server_starting_wait_never_reverts_to_recognizing_for_a_new_speech() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        let started_at = Instant::now() - Duration::from_secs(10);
-        controller.server_turn = ServerTurn::AwaitingFirstResponse { since: started_at };
-        controller.check_server_turn_overlay();
+        let started_at = Instant::now() - SERVER_RESPONSE_STARTING_OVERLAY_DELAY;
+        controller.server_response_wait_started_at = Some(started_at);
+        controller.check_server_response_wait_overlay();
 
         assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
         controller.handle_gate_event(GateEvent::SpeechStarted);
         end_speech(&mut controller);
-        controller.check_server_turn_overlay();
+        controller.check_server_response_wait_overlay();
 
-        assert_eq!(
-            controller.server_turn,
-            ServerTurn::AwaitingFirstResponse { since: started_at }
-        );
-        assert!(!matches!(
+        assert_eq!(controller.server_response_wait_started_at, Some(started_at));
+        assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
                 kind: OverlayKind::StartingServer,
@@ -4547,67 +4569,29 @@ mod tests {
     }
 
     #[test]
-    fn partial_response_enters_receiving_and_resets_final_wait() {
+    fn confirmed_server_transcript_clears_the_waiting_overlay() {
         let settings = settings_with(|settings| {
             settings.endpoint_mode = "server".to_string();
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(&mut controller, Duration::from_secs(10));
-        controller.handle_asr_event(AsrEvent::PartialText(vec![asr_token("途中結果", false)]));
-        let ServerTurn::Receiving { last_activity_at } = controller.server_turn else {
-            panic!("途中結果は turn を閉じず Receiving へ進めるはず");
-        };
-        assert!(last_activity_at.elapsed() < Duration::from_secs(1));
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
+        controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("確定結果", true)]));
 
-        age_server_turn(&mut controller, Duration::from_secs(10));
-        controller.check_server_turn_overlay();
-
-        assert!(matches!(
-            controller.server_turn,
-            ServerTurn::Receiving { .. }
-        ));
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
         assert!(!matches!(
             controller.overlay,
             OverlayView::Shown {
-                kind: OverlayKind::StartingServer,
+                kind: OverlayKind::WaitingForResponse | OverlayKind::StartingServer,
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn response_wait_phases_are_scoped_to_streaming() {
-        let settings = settings_with(|settings| {
-            settings.endpoint_mode = "server".to_string();
-            settings.vad_min_speech_ms = 0;
-            settings.vad_min_silence_ms = 0;
-        });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
-
-        end_speech(&mut controller);
-        assert_eq!(controller.session.state(), SessionState::Streaming);
-        assert!(matches!(
-            controller.server_turn,
-            ServerTurn::AwaitingFirstResponse { .. }
-        ));
-
-        controller.handle_asr_event(AsrEvent::PartialText(vec![asr_token("途中", false)]));
-        assert_eq!(controller.session.state(), SessionState::Streaming);
-        assert!(matches!(
-            controller.server_turn,
-            ServerTurn::Receiving { .. }
-        ));
-
-        controller.handle_asr_event(AsrEvent::Failed(AsrError::ClosedEarly));
-        assert_eq!(controller.session.state(), SessionState::Listening);
-        assert_eq!(controller.server_turn, ServerTurn::Idle);
-
-        controller.observe_server_activity(ServerActivity::Response, "test outside streaming");
-        assert_eq!(controller.server_turn, ServerTurn::Idle);
     }
 
     #[test]
@@ -4617,12 +4601,13 @@ mod tests {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
         controller.handle_asr_event(AsrEvent::Endpoint);
 
-        assert_eq!(controller.server_turn, ServerTurn::Completed);
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
         assert_eq!(controller.overlay, OverlayView::Hidden);
     }
 
@@ -4635,20 +4620,18 @@ mod tests {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
-        controller.check_server_turn_overlay();
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
 
         controller.handle_asr_event(AsrEvent::FinalText(vec![asr_token("確定結果", true)]));
-        assert!(matches!(
-            controller.server_turn,
-            ServerTurn::Receiving { .. }
-        ));
         controller.handle_asr_event(AsrEvent::Endpoint);
 
-        assert_eq!(controller.server_turn, ServerTurn::Completed);
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
         assert_eq!(controller.overlay, OverlayView::Hidden);
         assert_eq!(
             controller
@@ -4666,16 +4649,16 @@ mod tests {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(
-            &mut controller,
-            SERVER_RESPONSE_WAITING_OVERLAY_DELAY - Duration::from_millis(100),
+        controller.server_response_wait_started_at = Some(
+            Instant::now() - (SERVER_RESPONSE_WAITING_OVERLAY_DELAY - Duration::from_millis(100)),
         );
-        controller.check_server_turn_overlay();
+        controller.check_server_response_wait_overlay();
 
         assert_eq!(controller.overlay, OverlayView::Hidden);
+        assert!(!controller.server_response_wait_overlay_visible);
     }
 
     #[test]
@@ -4685,17 +4668,19 @@ mod tests {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
-        controller.check_server_turn_overlay();
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
         controller.handle_asr_event(AsrEvent::Notice {
             code: "gate_blocked".to_string(),
             message: "登録した声と一致しませんでした。".to_string(),
         });
 
-        assert_eq!(controller.server_turn, ServerTurn::Completed);
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
         assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
@@ -4712,11 +4697,12 @@ mod tests {
             settings.vad_min_speech_ms = 0;
             settings.vad_min_silence_ms = 0;
         });
-        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        age_server_turn(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
-        controller.check_server_turn_overlay();
+        controller.server_response_wait_started_at =
+            Some(Instant::now() - SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
+        controller.check_server_response_wait_overlay();
         controller.handle_asr_event(AsrEvent::Failed(AsrError::Server {
             code: 503,
             error_type: "unavailable".to_string(),
@@ -4724,7 +4710,8 @@ mod tests {
             request_id: None,
         }));
 
-        assert_eq!(controller.server_turn, ServerTurn::Idle);
+        assert!(controller.server_response_wait_started_at.is_none());
+        assert!(!controller.server_response_wait_overlay_visible);
         assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
@@ -4820,15 +4807,9 @@ mod tests {
 
         controller.handle_asr_event(AsrEvent::Endpoint);
         assert!(!controller.server_audio_paused);
-        assert_eq!(controller.server_turn, ServerTurn::Completed);
 
         end_speech(&mut controller);
         assert!(controller.server_audio_paused, "VAD が黙ったら送信を止める");
-        assert_eq!(
-            controller.server_turn,
-            ServerTurn::Completed,
-            "server response 後の SpeechEnded は新しい待ちを作らない"
-        );
 
         while asr_commands.try_recv().is_ok() {}
         controller.handle_vad_samples(&[101, -202]);
@@ -4846,7 +4827,7 @@ mod tests {
         assert!(!idle_close_is_due(
             SessionState::Streaming,
             true,
-            ServerTurn::Idle,
+            false,
             old_endpoint,
             15,
             now
@@ -4854,7 +4835,7 @@ mod tests {
         assert!(idle_close_is_due(
             SessionState::Streaming,
             false,
-            ServerTurn::Idle,
+            false,
             old_endpoint,
             15,
             now
@@ -4862,36 +4843,16 @@ mod tests {
     }
 
     #[test]
-    fn response_wait_only_blocks_idle_close_until_its_turn_timeout() {
+    fn idle_close_never_fires_while_a_response_is_still_pending() {
         // 背後のコールドスタートは 30〜60 秒かかる。応答を待っている間に閉じると、
         // 起きる前に諦めることになり、その発話は永久に返らない。
         let now = Instant::now();
-        let old_endpoint = Some(now - SERVER_FIRST_RESPONSE_TIMEOUT - Duration::from_secs(1));
+        let old_endpoint = Some(now - Duration::from_secs(16));
 
         assert!(!idle_close_is_due(
             SessionState::Streaming,
             false,
-            ServerTurn::AwaitingFirstResponse { since: now },
-            old_endpoint,
-            15,
-            now
-        ));
-        assert!(idle_close_is_due(
-            SessionState::Streaming,
-            false,
-            ServerTurn::AwaitingFirstResponse {
-                since: now - SERVER_FIRST_RESPONSE_TIMEOUT,
-            },
-            old_endpoint,
-            15,
-            now
-        ));
-        assert!(idle_close_is_due(
-            SessionState::Streaming,
-            false,
-            ServerTurn::Receiving {
-                last_activity_at: now - SERVER_FINAL_RESPONSE_TIMEOUT,
-            },
+            true,
             old_endpoint,
             15,
             now
