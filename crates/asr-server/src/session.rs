@@ -380,6 +380,7 @@ impl Session {
                         notice_code: None,
                         notice_message: None,
                         backend: None,
+                        warmup_after_secs: None,
                     });
                 }
             }
@@ -456,6 +457,7 @@ impl Session {
             notice_code: None,
             notice_message: None,
             backend: None,
+            warmup_after_secs: None,
         });
         self.state = SessionState::Closing;
         action.close_code = Some(1000);
@@ -548,6 +550,7 @@ fn error_response(code: u32, error_type: &str, message: &str) -> AsrResponse {
         notice_code: None,
         notice_message: None,
         backend: None,
+        warmup_after_secs: None,
     }
 }
 
@@ -569,6 +572,7 @@ fn response_with_marker(marker: Marker, text: &str) -> AsrResponse {
         notice_code: None,
         notice_message: None,
         backend: None,
+        warmup_after_secs: None,
     }
 }
 
