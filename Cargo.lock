@@ -3173,7 +3173,7 @@ checksum = "d7b497d21a8b6fbb4b5a544f8fadb77e801a09ae0add9e411d31c6f89e3c1e90"
 
 [[package]]
 name = "otoa-asr-server"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "otoa-input-app"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -3215,7 +3215,7 @@ dependencies = [
 
 [[package]]
 name = "otoa-input-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -3226,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "otoa-input-kodama"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "ndarray 0.16.1",
@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "otoa-input-onnx"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "ort",
@@ -3247,7 +3247,7 @@ dependencies = [
 
 [[package]]
 name = "otoa-input-platform"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3265,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "otoa-input-protocol"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -3280,7 +3280,7 @@ dependencies = [
 
 [[package]]
 name = "otoa-input-vad"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "ndarray 0.16.1",
