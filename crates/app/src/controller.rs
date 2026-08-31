@@ -44,8 +44,11 @@ const FAILED_RETRY_MAX: Duration = Duration::from_secs(30);
 /// enrollment のリモート失敗は、100 ms tick ごとに再試行せず最低 5 秒待つ。
 const ENROLL_RETRY_INITIAL: Duration = Duration::from_secs(5);
 const ENROLL_RETRY_MAX: Duration = Duration::from_secs(60);
-/// Modal の scaledown_window と揃える。これ以上 ASR の成功応答が無ければ、
+/// 認識器が寝るまでの時間に合わせた既定。これ以上 ASR の成功応答が無ければ、
 /// 次の発話の前に enrollment を送り、認識器が起きるまで待つ。
+///
+/// **サーバーが `warmup_after_secs` を名乗ればそちらに従う。** 向こうの配備が
+/// 変わると、ここの数字は黙って合わなくなる。
 const WARMUP_IDLE_THRESHOLD: Duration = Duration::from_secs(60);
 /// 暖機を待って発話を保留するのは、これだけまで。
 ///
