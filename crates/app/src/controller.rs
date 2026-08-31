@@ -1621,7 +1621,23 @@ impl Controller {
 
     /// 接続前 enrollment の唯一の同期入口。リモート失敗は gateway 側の回復へ
     /// 任せて接続を続け、端末でしか直せない不足だけを永続エラーにする。
+    ///
+    /// **ここはコントローラのスレッドを止めて往復する。** 直前に暖機が通って
+    /// いるなら、同じ登録をもう一度送っても結果は変わらない。遠隔が遅い日は
+    /// この往復のぶんだけ接続が遅れ、1 発話目が間に合わなくなる（片道 2 秒で
+    /// 実測 16 秒。4 発話中 1 発話が落ちた）。
+    ///
+    /// 省いてよいのは「直前の登録が通っている」ときだけである。
+    /// `warmup_is_due` は「最近使ったか」も含むので使えない ── 一度も喋って
+    /// いない起動直後は偽になり、声を登録していない人へ何も伝えないまま
+    /// 接続してしまう。
     fn ensure_enrolled_before_connection(&mut self) -> bool {
+        let enrollment_is_fresh = self
+            .last_successful_asr_response_at
+            .is_some_and(|at| at.elapsed() < self.warmup_idle_threshold());
+        if enrollment_is_fresh {
+            return true;
+        }
         match self
             .provider
             .ensure_enrolled(&self.settings.core, EnrollReason::BeforeConnection)
@@ -3611,6 +3627,34 @@ mod tests {
         assert!(
             controller.hold_paste_after_warmup,
             "待たせた発話に貼り付け保留の印が付いていない"
+        );
+    }
+
+    /// **直前の登録が通っているなら、接続前にもう一度往復しない。**
+    ///
+    /// ここはコントローラのスレッドを止めて往復する。遠隔が遅い日は、そのぶん
+    /// 接続が遅れて 1 発話目が間に合わなくなる。
+    #[test]
+    fn a_fresh_enrollment_is_not_sent_again_before_connecting() {
+        let (mut controller, calls) = warmup_controller(Settings::default());
+        controller.last_successful_asr_response_at = Some(Instant::now());
+
+        assert!(controller.ensure_enrolled_before_connection());
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "同じ登録を送り直している");
+    }
+
+    /// **登録が古ければ送る。** 向こうの登録はインスタンスの記憶にしかないので、
+    /// 時間が経てば消えている。
+    #[test]
+    fn a_stale_enrollment_is_sent_before_connecting() {
+        let (mut controller, calls) = warmup_controller(Settings::default());
+        controller.last_successful_asr_response_at = Some(Instant::now() - WARMUP_IDLE_THRESHOLD);
+
+        assert!(controller.ensure_enrolled_before_connection());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "古い登録を送り直していない"
         );
     }
 
