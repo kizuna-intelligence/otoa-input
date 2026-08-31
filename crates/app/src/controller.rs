@@ -88,6 +88,28 @@ struct DeferredSpeech {
     ended: bool,
 }
 
+/// 走っている暖機。生まれるときも消えるときも一式で動く。
+struct WarmupJob {
+    started_at: Instant,
+    reason: WarmupReason,
+    rx: Receiver<EnrollmentWarmupResult>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl WarmupJob {
+    /// 試験用に、走っていることにするだけの job を作る。
+    #[cfg(test)]
+    fn for_test(started_at: Instant) -> Self {
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        Self {
+            started_at,
+            reason: WarmupReason::Idle,
+            rx,
+            thread: None,
+        }
+    }
+}
+
 /// ASR への接続一式。生まれるときも消えるときも 3 つ揃っている。
 struct AsrTransport {
     to_asr: Sender<AsrCommand>,
@@ -441,13 +463,16 @@ pub struct Controller {
     overlay_notice_until: Option<Instant>,
     splash_started_at: Option<Instant>,
     /// enrollment worker が走っているか。
-    warmup_in_progress: bool,
-    warmup_result_rx: Option<Receiver<(u64, EnrollmentWarmupResult)>>,
-    warmup_thread: Option<thread::JoinHandle<()>>,
-    warmup_started_at: Option<Instant>,
-    warmup_reason: Option<WarmupReason>,
-    /// cancel 後に遅れて届いた worker 結果を捨てる世代。
-    warmup_epoch: u64,
+    /// 走っている暖機。**進行中かどうかは、これが有るかどうかである。**
+    ///
+    /// 進行中の旗・受け口・スレッド・開始時刻・理由を別々に持っていたときは、
+    /// 「進行中なのに開始時刻が無い」ような組み合わせを型が許していた。実際、
+    /// 片付けが開始時刻を先に消すので、保留した発話を送り直すときに本当の
+    /// 開始時刻を失っていた。
+    ///
+    /// 取り消しはこれを落とすだけでよい。受け口ごと落ちるので、遅れて届く
+    /// 結果は送り先を失って捨てられる。通し番号で照合する必要が無くなった。
+    warmup: Option<WarmupJob>,
     /// `RetryableRemote` の次回試行時刻と指数バックオフ。
     warmup_retry_at: Option<Instant>,
     warmup_retry_delay: Duration,
@@ -622,12 +647,7 @@ impl Controller {
             #[cfg(test)]
             overlay_notice_until: None,
             splash_started_at: Some(splash_started_at),
-            warmup_in_progress: false,
-            warmup_result_rx: None,
-            warmup_thread: None,
-            warmup_started_at: None,
-            warmup_reason: None,
-            warmup_epoch: 0,
+            warmup: None,
             warmup_retry_at: None,
             warmup_retry_delay: ENROLL_RETRY_INITIAL,
             last_successful_asr_response_at: None,
@@ -858,7 +878,7 @@ impl Controller {
     /// enrollment worker を開始する。実際に呼ぶ経路は `Listening` 中の idle
     /// scheduler と SpeechStarted の補助経路だけで、Disabled 中には走らない。
     fn start_warmup(&mut self, reason: WarmupReason) -> bool {
-        if self.warmup_in_progress {
+        if self.warmup.is_some() {
             return true;
         }
         if !self.provider.enrollment_is_eligible(&self.settings.core)
@@ -874,117 +894,84 @@ impl Controller {
         let (result_tx, result_rx) = crossbeam_channel::bounded(1);
         let provider = Arc::clone(&self.provider);
         let settings = self.settings.core.clone();
-        self.warmup_epoch = self.warmup_epoch.wrapping_add(1);
-        let worker_epoch = self.warmup_epoch;
-
-        self.warmup_in_progress = true;
-        self.warmup_started_at = Some(started_at);
-        self.warmup_reason = Some(reason);
-        self.facts.warmup = Some(started_at);
-        self.splash_started_at = None;
-        self.refresh_overlay();
-        tracing::info!(
-            target: "otoa_input",
-            epoch = worker_epoch,
-            reason = reason.as_str(),
-            "warmup: started"
-        );
+        tracing::info!(target: "otoa_input", reason = reason.as_str(), "warmup: started");
 
         let worker = thread::Builder::new()
             .name("otoa-warmup".to_string())
             .spawn(move || {
                 let outcome = provider.ensure_enrolled(&settings, EnrollReason::Warmup);
-                let _ = result_tx.send((
-                    worker_epoch,
-                    EnrollmentWarmupResult {
-                        reason,
-                        started_at,
-                        outcome,
-                    },
-                ));
+                let _ = result_tx.send(EnrollmentWarmupResult {
+                    reason,
+                    started_at,
+                    outcome,
+                });
             });
 
         match worker {
             Ok(worker) => {
-                self.warmup_result_rx = Some(result_rx);
-                self.warmup_thread = Some(worker);
+                // **job を入れてから描く。** 表示は job から作り直されるので、
+                // 先に描くと「暖機中」が即座に消える。
+                self.warmup = Some(WarmupJob {
+                    started_at,
+                    reason,
+                    rx: result_rx,
+                    thread: Some(worker),
+                });
+                self.splash_started_at = None;
+                self.refresh_overlay();
             }
             Err(error) => {
-                self.finish_warmup_worker();
-                self.finish_enrollment_warmup(
-                    worker_epoch,
-                    EnrollmentWarmupResult {
-                        reason,
-                        started_at,
-                        outcome: EnrollOutcome::RetryableRemote(format!(
-                            "起動処理を開始できませんでした: {error}"
-                        )),
-                    },
-                );
+                self.finish_enrollment_warmup(EnrollmentWarmupResult {
+                    reason,
+                    started_at,
+                    outcome: EnrollOutcome::RetryableRemote(format!(
+                        "起動処理を開始できませんでした: {error}"
+                    )),
+                });
             }
         }
         true
     }
 
     fn drain_warmup_events(&mut self) {
-        let result = match self.warmup_result_rx.as_ref().map(Receiver::try_recv) {
-            Some(Ok(result)) => Some(result),
-            Some(Err(TryRecvError::Empty)) => None,
-            Some(Err(TryRecvError::Disconnected)) => Some((
-                self.warmup_epoch,
-                EnrollmentWarmupResult {
-                    reason: self.warmup_reason.unwrap_or(WarmupReason::Startup),
-                    started_at: self.warmup_started_at.unwrap_or_else(Instant::now),
-                    outcome: EnrollOutcome::RetryableRemote(
-                        "起動処理が予期せず終了しました".to_string(),
-                    ),
-                },
-            )),
-            None => None,
-        };
-        let Some((worker_epoch, result)) = result else {
+        let Some(job) = self.warmup.as_ref() else {
             return;
         };
-        self.finish_warmup_worker();
-        self.finish_enrollment_warmup(worker_epoch, result);
-    }
-
-    fn finish_warmup_worker(&mut self) {
-        self.warmup_result_rx = None;
-        self.warmup_started_at = None;
-        self.warmup_reason = None;
-        if let Some(worker) = self.warmup_thread.take() {
-            let _ = worker.join();
-        }
+        let result = match job.rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => EnrollmentWarmupResult {
+                reason: job.reason,
+                started_at: job.started_at,
+                outcome: EnrollOutcome::RetryableRemote(
+                    "起動処理が予期せず終了しました".to_string(),
+                ),
+            },
+        };
+        // **結果を扱う前に job を落とさない。** 開始時刻は保留した発話を
+        // 送り直すときにも使う。先に消すと本当の開始時刻を失う。
+        self.finish_enrollment_warmup(result);
     }
 
     fn cancel_warmup(&mut self) {
         // reqwest の blocking request は途中で安全に取り消せない。終了を待つと
         // 最大 timeout までアプリを閉じられなくなるため、JoinHandle を外して
-        // プロセス終了に任せる。世代を進め、遅れて届く結果も無視する。
-        self.warmup_epoch = self.warmup_epoch.wrapping_add(1);
-        self.warmup_in_progress = false;
-        self.warmup_result_rx = None;
-        self.warmup_started_at = None;
-        self.warmup_reason = None;
+        // プロセス終了に任せる。job ごと落とせば受け口も消えるので、遅れて
+        // 届く結果は送り先を失って捨てられる。
+        if let Some(mut job) = self.warmup.take() {
+            job.thread.take();
+        }
         self.facts.warmup = None;
         self.clear_deferred_warmup_speech();
-        self.warmup_thread.take();
     }
 
-    fn finish_enrollment_warmup(&mut self, worker_epoch: u64, result: EnrollmentWarmupResult) {
-        if worker_epoch != self.warmup_epoch || !self.warmup_in_progress {
-            tracing::debug!(
-                target: "otoa_input",
-                worker_epoch,
-                current_epoch = self.warmup_epoch,
-                "discarded stale warmup result"
-            );
-            return;
-        }
-
+    fn finish_enrollment_warmup(&mut self, result: EnrollmentWarmupResult) {
         let was_warming = self.is_warming_overlay();
-        self.warmup_in_progress = false;
+        if let Some(mut job) = self.warmup.take() {
+            if let Some(thread) = job.thread.take() {
+                let _ = thread.join();
+            }
+        }
         self.facts.warmup = None;
         let elapsed_ms = result.started_at.elapsed().as_millis() as u64;
         match result.outcome {
@@ -1048,7 +1035,7 @@ impl Controller {
     #[cfg(test)]
     fn finish_warmup(&mut self, result: WarmupResult) {
         let was_warming = self.is_warming_overlay();
-        self.warmup_in_progress = false;
+        self.warmup = None;
         self.facts.warmup = None;
         let elapsed_ms = result.started_at.elapsed().as_millis() as u64;
         match result.result {
@@ -1110,7 +1097,11 @@ impl Controller {
         }
         self.finish_after_deferred_warmup_connect = speech_ended;
         // ここから最初の応答までは、暖機と地続きの「準備中」として見せる。
-        self.warmup_until_response = Some(self.warmup_started_at.unwrap_or_else(Instant::now));
+        self.warmup_until_response = Some(
+            self.warmup
+                .as_ref()
+                .map_or_else(Instant::now, |job| job.started_at),
+        );
         self.hold_paste_after_warmup = true;
         if let Err(error) = self.start_asr_after_speech_started(preroll, speech_audio) {
             if self.session.state() != SessionState::Disabled {
@@ -1134,8 +1125,9 @@ impl Controller {
 
     /// 暖機を待って保留してよい時間の内側か。
     fn warmup_is_within_defer_deadline(&self) -> bool {
-        self.warmup_started_at
-            .is_none_or(|started_at| started_at.elapsed() < WARMUP_DEFER_DEADLINE)
+        self.warmup
+            .as_ref()
+            .is_none_or(|job| job.started_at.elapsed() < WARMUP_DEFER_DEADLINE)
     }
 
     fn warmup_is_due(&self) -> bool {
@@ -1534,7 +1526,7 @@ impl Controller {
                 self.log_server_response_wait_kept("next speech started");
                 self.clear_commit_hold();
                 self.clear_overlay_notice();
-                if self.warmup_in_progress && self.warmup_is_within_defer_deadline() {
+                if self.warmup.is_some() && self.warmup_is_within_defer_deadline() {
                     // 暖機と同時に話し始めた場合は結果を待つ。終わったら
                     // この音声で接続を続ける。
                     //
@@ -1552,7 +1544,7 @@ impl Controller {
                     tracing::debug!(target: "otoa_input", "speech deferred while warmup is running");
                     return;
                 }
-                if self.warmup_in_progress {
+                if self.warmup.is_some() {
                     // **待ちすぎた。保留をやめて繋ぐ。** 遠隔が返らないあいだ
                     // 保留し続けると、喋ったぶんが 1 つも送られない。
                     tracing::warn!(
@@ -1778,7 +1770,7 @@ impl Controller {
             deferred.audio.push(samples.to_vec());
             return;
         }
-        if self.warmup_in_progress {
+        if self.warmup.is_some() {
             // idle warmup 中は SpeechStarted が上で deferred 状態へ切り替えるまで
             // 入力を ASR に渡さない。
             return;
@@ -2745,8 +2737,8 @@ impl Controller {
             GateState::Idle
         };
         // 暖機中と、そこから続く「最初の応答待ち」を、ひと続きで見せる。
-        self.facts.warmup = match self.warmup_started_at {
-            Some(started_at) if self.warmup_in_progress => Some(started_at),
+        self.facts.warmup = match self.warmup.as_ref().map(|job| job.started_at) {
+            Some(started_at) if self.warmup.is_some() => Some(started_at),
             _ => self.waiting_after_warmup(),
         };
 
@@ -3188,7 +3180,7 @@ mod tests {
         apply_input_gain, combine_readiness, failed_retry_is_due, gate_from_settings,
         idle_close_is_due, is_loopback_host, is_nonfatal_asr_error, is_user_action_failure_message,
         level_status, next_enroll_retry_delay, next_failed_retry_delay, resolve_paste_shortcut,
-        AsrTransport, Controller, LevelStatus, OverlayKind, OverlayView, WarmupReason,
+        AsrTransport, Controller, LevelStatus, OverlayKind, OverlayView, WarmupJob, WarmupReason,
         WarmupResult, ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL,
         FAILED_RETRY_MAX, GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION,
         PENDING_AUDIO_MAX_BYTES, SERVER_RESPONSE_STARTING_OVERLAY_DELAY,
@@ -3500,12 +3492,12 @@ mod tests {
 
     fn wait_for_warmup(controller: &mut Controller) {
         let deadline = Instant::now() + Duration::from_secs(1);
-        while controller.warmup_in_progress && Instant::now() < deadline {
+        while controller.warmup.is_some() && Instant::now() < deadline {
             controller.drain_warmup_events();
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(
-            !controller.warmup_in_progress,
+            controller.warmup.is_none(),
             "warmup worker did not report completion"
         );
     }
@@ -3515,7 +3507,7 @@ mod tests {
         let (mut controller, calls) = warmup_controller(Settings::default());
 
         assert!(controller.start_warmup(WarmupReason::Startup));
-        assert!(controller.warmup_in_progress);
+        assert!(controller.warmup.is_some());
         assert_eq!(
             controller.overlay,
             OverlayView::Shown {
@@ -3548,7 +3540,7 @@ mod tests {
 
         controller.handle_gate_event(GateEvent::SpeechStarted);
 
-        assert!(controller.warmup_in_progress);
+        assert!(controller.warmup.is_some());
         assert!(controller.deferred_speech.is_some());
         assert_eq!(controller.session.state(), SessionState::Listening);
         assert!(controller.asr.is_none());
@@ -3579,7 +3571,7 @@ mod tests {
         controller.preroll.push(&[2_i16; 160]);
 
         controller.handle_gate_event(GateEvent::SpeechStarted);
-        assert!(controller.warmup_in_progress, "暖機が始まっていない");
+        assert!(controller.warmup.is_some(), "暖機が始まっていない");
         assert!(controller.deferred_speech.is_some(), "発話を保留していない");
 
         // **喋り出しの前の蓄えを預かること。** 落とすと、送られるのは語尾だけの
@@ -3743,8 +3735,7 @@ mod tests {
     fn speech_is_not_held_forever_when_the_warmup_does_not_answer() {
         let (mut controller, _calls) = warmup_controller(Settings::default());
         assert!(controller.session.apply(SessionInput::Enable));
-        controller.warmup_in_progress = true;
-        controller.warmup_started_at = Some(Instant::now() - WARMUP_DEFER_DEADLINE);
+        controller.warmup = Some(WarmupJob::for_test(Instant::now() - WARMUP_DEFER_DEADLINE));
 
         controller.handle_gate_event(GateEvent::SpeechStarted);
 
@@ -3760,8 +3751,7 @@ mod tests {
     fn a_second_speech_during_the_warmup_does_not_replace_the_first() {
         let (mut controller, _calls) = warmup_controller(Settings::default());
         assert!(controller.session.apply(SessionInput::Enable));
-        controller.warmup_in_progress = true;
-        controller.warmup_started_at = Some(Instant::now());
+        controller.warmup = Some(WarmupJob::for_test(Instant::now()));
         controller.preroll.push(&[2_i16; 160]);
 
         controller.handle_gate_event(GateEvent::SpeechStarted);
@@ -3802,9 +3792,9 @@ mod tests {
 
         controller.enable_listening();
 
-        assert!(controller.warmup_in_progress, "起動直後に登録していない");
+        assert!(controller.warmup.is_some(), "起動直後に登録していない");
         assert!(matches!(
-            controller.warmup_reason,
+            controller.warmup.as_ref().map(|job| job.reason),
             Some(WarmupReason::Startup)
         ));
         wait_for_warmup(&mut controller);
@@ -3812,18 +3802,12 @@ mod tests {
 
         // 2 回目の待受開始では繰り返さない（無操作の暖機に任せる）。
         controller.enable_listening();
-        assert!(
-            !controller.warmup_in_progress,
-            "同じ待受で二重に暖機している"
-        );
+        assert!(controller.warmup.is_none(), "同じ待受で二重に暖機している");
 
         // 待受を止めたら、次に始めるときはまた 1 回通す。
         controller.disable_listening();
         controller.enable_listening();
-        assert!(
-            controller.warmup_in_progress,
-            "止めた後に登録し直していない"
-        );
+        assert!(controller.warmup.is_some(), "止めた後に登録し直していない");
     }
 
     /// **声を録り直したら、その場で登録し直す。**
@@ -3839,9 +3823,9 @@ mod tests {
 
         assert!(controller.start_warmup(WarmupReason::VoiceChanged));
 
-        assert!(controller.warmup_in_progress);
+        assert!(controller.warmup.is_some());
         assert!(matches!(
-            controller.warmup_reason,
+            controller.warmup.as_ref().map(|job| job.reason),
             Some(WarmupReason::VoiceChanged)
         ));
         // **画面に出ること。** 無表示で登録すると、待たされている理由が
@@ -3897,7 +3881,7 @@ mod tests {
 
         controller.start_idle_warmup_if_due();
 
-        assert!(controller.warmup_in_progress);
+        assert!(controller.warmup.is_some());
         assert!(controller.deferred_speech.is_none());
         assert_eq!(controller.session.state(), SessionState::Listening);
         assert!(matches!(
@@ -3916,7 +3900,7 @@ mod tests {
         let (mut controller, _calls) = warmup_controller(Settings::default());
         // 暖機は「最近使った」ときだけ続く。
         controller.last_confident_speech_at = Some(Instant::now());
-        controller.warmup_in_progress = true;
+        controller.warmup = Some(WarmupJob::for_test(Instant::now()));
         controller.set_overlay(OverlayView::Shown {
             kind: OverlayKind::WarmingUp,
             committed: String::new(),
@@ -3930,7 +3914,7 @@ mod tests {
             result: Err(anyhow::anyhow!("gateway timed out while starting")),
         });
 
-        assert!(!controller.warmup_in_progress);
+        assert!(controller.warmup.is_none());
         assert!(controller.warmup_is_due());
         assert!(matches!(
             controller.overlay,
@@ -3999,7 +3983,7 @@ mod tests {
 
         controller.start_idle_warmup_if_due();
 
-        assert!(!controller.warmup_in_progress);
+        assert!(controller.warmup.is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
