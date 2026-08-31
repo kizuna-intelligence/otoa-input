@@ -38,6 +38,16 @@ const ENROLL_RETRY_MAX: Duration = Duration::from_secs(60);
 /// Modal の scaledown_window と揃える。これ以上 ASR の成功応答が無ければ、
 /// 次の発話の前に enrollment を送り、認識器が起きるまで待つ。
 const WARMUP_IDLE_THRESHOLD: Duration = Duration::from_secs(60);
+/// 暖機を待って発話を保留するのは、これだけまで。
+///
+/// **遠隔が遅い日に、喋ったぶんを全部飲ませない。** 登録は普段 0.3 秒で終わる。
+/// それが返らないときに待ち続けると、その間の発話は保留に積まれるだけで
+/// 1 つも送られない（`ENROLL_TIMEOUT` は 180 秒ある）。実際に、起動直後の
+/// 暖機が返らず 4 発話が続けて消えた。
+///
+/// 過ぎたら保留せずそのまま繋ぐ。ゲートウェイは保存済みの参照音声から
+/// 復帰できるので、登録が済んでいなくても認識は始められる。
+const WARMUP_DEFER_DEADLINE: Duration = Duration::from_secs(3);
 /// 最後に喋ってからこれだけ経ったら、暖機をやめる。
 ///
 /// **止めないと、開いているだけで GPU が一日中起きたままになる。**
@@ -1096,6 +1106,12 @@ impl Controller {
         self.server_warmup_after.unwrap_or(WARMUP_IDLE_THRESHOLD)
     }
 
+    /// 暖機を待って保留してよい時間の内側か。
+    fn warmup_is_within_defer_deadline(&self) -> bool {
+        self.warmup_started_at
+            .is_none_or(|started_at| started_at.elapsed() < WARMUP_DEFER_DEADLINE)
+    }
+
     fn warmup_is_due(&self) -> bool {
         self.provider.enrollment_is_eligible(&self.settings.core)
             && self.recently_used()
@@ -1493,15 +1509,32 @@ impl Controller {
                 self.log_server_response_wait_kept("next speech started");
                 self.clear_commit_hold();
                 self.clear_overlay_notice();
-                if self.warmup_in_progress {
-                    // idle warmup と同時に話し始めた場合は結果を待つ。ただし
-                    // RetryableRemote ならこの音声で接続を続けるため、入力は保持する。
-                    self.deferred_speech = Some(DeferredSpeech {
-                        preroll: self.preroll.take(),
-                        ..DeferredSpeech::default()
-                    });
+                if self.warmup_in_progress && self.warmup_is_within_defer_deadline() {
+                    // 暖機と同時に話し始めた場合は結果を待つ。終わったら
+                    // この音声で接続を続ける。
+                    //
+                    // **既に保留があるなら上書きしない。** 上書きすると、
+                    // 暖機が長引いたときに最後の 1 発話しか残らない。
+                    // 続けて喋ったぶんは同じ保留へ足し、まとめて送る。
+                    let preroll = self.preroll.take();
+                    let deferred = self
+                        .deferred_speech
+                        .get_or_insert_with(DeferredSpeech::default);
+                    if deferred.preroll.is_empty() {
+                        deferred.preroll = preroll;
+                    }
+                    deferred.ended = false;
                     tracing::debug!(target: "otoa_input", "speech deferred while warmup is running");
                     return;
+                }
+                if self.warmup_in_progress {
+                    // **待ちすぎた。保留をやめて繋ぐ。** 遠隔が返らないあいだ
+                    // 保留し続けると、喋ったぶんが 1 つも送られない。
+                    tracing::warn!(
+                        target: "otoa_input",
+                        deadline_secs = WARMUP_DEFER_DEADLINE.as_secs(),
+                        "暖機が返らないので、保留せずに繋ぐ"
+                    );
                 }
                 if self.session.state() == SessionState::Listening && self.warmup_is_due() {
                     self.deferred_speech = Some(DeferredSpeech {
@@ -3123,7 +3156,7 @@ mod tests {
         ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
         GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION, PENDING_AUDIO_LIMIT,
         SERVER_RESPONSE_STARTING_OVERLAY_DELAY, SERVER_RESPONSE_WAITING_OVERLAY_DELAY,
-        WARMUP_IDLE_THRESHOLD,
+        WARMUP_DEFER_DEADLINE, WARMUP_IDLE_THRESHOLD,
     };
     use crate::connection::SelfHostedProvider;
     use crate::settings::Settings;
@@ -3568,6 +3601,60 @@ mod tests {
         assert!(
             controller.hold_paste_after_warmup,
             "待たせた発話に貼り付け保留の印が付いていない"
+        );
+    }
+
+    /// **暖機が返らないときに、喋ったぶんを飲み続けない。**
+    ///
+    /// 登録は普段 0.3 秒で終わる。返らない日に待ち続けると、その間の発話は
+    /// 保留に積まれるだけで 1 つも送られない。実際に 4 発話が続けて消えた。
+    #[test]
+    fn speech_is_not_held_forever_when_the_warmup_does_not_answer() {
+        let (mut controller, _calls) = warmup_controller(Settings::default());
+        assert!(controller.session.apply(SessionInput::Enable));
+        controller.warmup_in_progress = true;
+        controller.warmup_started_at = Some(Instant::now() - WARMUP_DEFER_DEADLINE);
+
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+
+        assert!(
+            controller.deferred_speech.is_none(),
+            "待ちすぎているのに保留している"
+        );
+    }
+
+    /// **保留を上書きしない。** 上書きすると、暖機が長引いたときに
+    /// 最後の 1 発話しか残らない。
+    #[test]
+    fn a_second_speech_during_the_warmup_does_not_replace_the_first() {
+        let (mut controller, _calls) = warmup_controller(Settings::default());
+        assert!(controller.session.apply(SessionInput::Enable));
+        controller.warmup_in_progress = true;
+        controller.warmup_started_at = Some(Instant::now());
+        controller.preroll.push(&[2_i16; 160]);
+
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        controller.handle_vad_samples(&[1_i16; 160]);
+        controller.handle_gate_event(GateEvent::SpeechEnded);
+        let after_first = controller
+            .deferred_speech
+            .as_ref()
+            .expect("1 回目の保留")
+            .audio
+            .len();
+
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        controller.handle_vad_samples(&[1_i16; 160]);
+        let after_second = controller
+            .deferred_speech
+            .as_ref()
+            .expect("2 回目でも保留が残ること")
+            .audio
+            .len();
+
+        assert!(
+            after_second > after_first,
+            "2 回目が 1 回目を捨てている: {after_first} -> {after_second}"
         );
     }
 
