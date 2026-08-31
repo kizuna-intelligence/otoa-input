@@ -88,6 +88,27 @@ struct DeferredSpeech {
     ended: bool,
 }
 
+/// ASR への接続一式。生まれるときも消えるときも 3 つ揃っている。
+struct AsrTransport {
+    to_asr: Sender<AsrCommand>,
+    events: Receiver<AsrEvent>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl AsrTransport {
+    /// 試験用に、送り口だけを差し替えた一式を作る。受け口とスレッドは
+    /// 何もしないものを置く。**本体では使わない。**
+    #[cfg(test)]
+    fn for_test(to_asr: Sender<AsrCommand>) -> Self {
+        let (_events_tx, events) = crossbeam_channel::unbounded();
+        Self {
+            to_asr,
+            events,
+            thread: thread::spawn(|| {}),
+        }
+    }
+}
+
 const GATEWAY_URL_MISSING_MESSAGE: &str =
     "ゲートウェイURLが設定されていません。設定画面の「詳細」で指定してください。";
 
@@ -404,7 +425,10 @@ pub struct Controller {
     pub(crate) pending_audio: Vec<Vec<u8>>,
     /// 接続待ちの上限で捨てた音声フレーム数。無音のまま失われないようログにも出す。
     pending_audio_dropped_frames: u64,
-    pub(crate) to_asr: Option<Sender<AsrCommand>>,
+    /// ASR への接続一式。**3 つに分けない。** 送り口・受け口・スレッドは
+    /// 必ず同時に生まれて同時に消える。別々の Option に分けていたときは、
+    /// 片方だけ残った状態を型が許していた。
+    pub(crate) asr: Option<AsrTransport>,
     pub(crate) to_ui: Sender<UiUpdate>,
     pub(crate) text_out: TextOutput,
     facts: Facts,
@@ -530,8 +554,6 @@ pub struct Controller {
     vad_control: Sender<VadControl>,
     vad_events: Receiver<VadMessage>,
     vad_channel_open: bool,
-    asr_events: Option<Receiver<AsrEvent>>,
-    asr_thread: Option<thread::JoinHandle<()>>,
     pending_commit: String,
     #[cfg(test)]
     committed_hold_until: Option<Instant>,
@@ -579,7 +601,7 @@ impl Controller {
             settings,
             pending_audio: Vec::new(),
             pending_audio_dropped_frames: 0,
-            to_asr: None,
+            asr: None,
             to_ui,
             text_out,
             facts: Facts {
@@ -654,8 +676,6 @@ impl Controller {
             vad_control,
             vad_events,
             vad_channel_open: true,
-            asr_events: None,
-            asr_thread: None,
             pending_commit: String::new(),
             #[cfg(test)]
             committed_hold_until: None,
@@ -1810,9 +1830,11 @@ impl Controller {
 
         self.active_api_key = endpoint.api_key;
         self.asr_closing = false;
-        self.to_asr = Some(to_asr);
-        self.asr_events = Some(asr_events);
-        self.asr_thread = Some(asr_thread);
+        self.asr = Some(AsrTransport {
+            to_asr,
+            events: asr_events,
+            thread: asr_thread,
+        });
         self.pending_audio.clear();
         self.pending_audio_dropped_frames = 0;
         self.facts.error = None;
@@ -1850,7 +1872,7 @@ impl Controller {
     }
 
     fn send_audio_bytes(&mut self, bytes: Vec<u8>) -> bool {
-        let Some(to_asr) = self.to_asr.clone() else {
+        let Some(to_asr) = self.asr.as_ref().map(|asr| asr.to_asr.clone()) else {
             self.fail_runtime("音声認識セッションが利用できません".to_string());
             return false;
         };
@@ -1872,7 +1894,7 @@ impl Controller {
     }
 
     fn send_finalize(&mut self) -> bool {
-        let Some(to_asr) = self.to_asr.clone() else {
+        let Some(to_asr) = self.asr.as_ref().map(|asr| asr.to_asr.clone()) else {
             self.fail_runtime("音声認識セッションが利用できません".to_string());
             return false;
         };
@@ -1972,7 +1994,7 @@ impl Controller {
     fn sync_pending_wait_observer(&mut self) {}
 
     fn send_stop(&mut self) {
-        if let Some(to_asr) = self.to_asr.clone() {
+        if let Some(to_asr) = self.asr.as_ref().map(|asr| asr.to_asr.clone()) {
             self.asr_closing = true;
             if let Err(error) = to_asr.send(AsrCommand::Stop) {
                 tracing::debug!("failed to stop ASR session: {error}");
@@ -2010,7 +2032,7 @@ impl Controller {
 
     fn drain_asr_events(&mut self) {
         loop {
-            let next = self.asr_events.as_ref().map(|events| events.try_recv());
+            let next = self.asr.as_ref().map(|asr| asr.events.try_recv());
             match next {
                 Some(Ok(event)) => self.handle_asr_event(event),
                 Some(Err(TryRecvError::Empty)) => break,
@@ -2021,7 +2043,7 @@ impl Controller {
                     } else {
                         self.fail_runtime("音声認識セッションが予期せず終了しました".to_string());
                     }
-                    self.asr_events = None;
+                    self.asr = None;
                     break;
                 }
                 None => break,
@@ -2969,10 +2991,8 @@ impl Controller {
         self.client_finalize_sent = false;
         self.server_audio_paused = false;
         self.pause_when_gate_stops = false;
-        self.to_asr = None;
-        self.asr_events = None;
-        if let Some(session_thread) = self.asr_thread.take() {
-            let _ = session_thread.join();
+        if let Some(asr) = self.asr.take() {
+            let _ = asr.thread.join();
         }
         self.pending_audio.clear();
         self.pending_audio_dropped_frames = 0;
@@ -2988,6 +3008,13 @@ impl Controller {
         self.sent_frames = 0;
         self.last_audio_log_at = None;
         self.asr_closing = false;
+        // **接続を落としたら、状態も繋がっていない側へ戻す。**
+        //
+        // 落としたのに Streaming のまま残ると、次の音声は「繋がっている」
+        // 経路へ入り、もう無い送り先へ送って失敗する。接続先を変えたときに
+        // 実際に通る道である。Aborted は Connecting / Streaming / Closing
+        // からだけ効き、それ以外では何も起きない。
+        let _ = self.session.apply(SessionInput::Aborted);
     }
 }
 
@@ -3161,11 +3188,11 @@ mod tests {
         apply_input_gain, combine_readiness, failed_retry_is_due, gate_from_settings,
         idle_close_is_due, is_loopback_host, is_nonfatal_asr_error, is_user_action_failure_message,
         level_status, next_enroll_retry_delay, next_failed_retry_delay, resolve_paste_shortcut,
-        Controller, LevelStatus, OverlayKind, OverlayView, WarmupReason, WarmupResult,
-        ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
-        GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION, PENDING_AUDIO_MAX_BYTES,
-        SERVER_RESPONSE_STARTING_OVERLAY_DELAY, SERVER_RESPONSE_WAITING_OVERLAY_DELAY,
-        WARMUP_DEFER_DEADLINE, WARMUP_IDLE_THRESHOLD,
+        AsrTransport, Controller, LevelStatus, OverlayKind, OverlayView, WarmupReason,
+        WarmupResult, ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL,
+        FAILED_RETRY_MAX, GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION,
+        PENDING_AUDIO_MAX_BYTES, SERVER_RESPONSE_STARTING_OVERLAY_DELAY,
+        SERVER_RESPONSE_WAITING_OVERLAY_DELAY, WARMUP_DEFER_DEADLINE, WARMUP_IDLE_THRESHOLD,
     };
     use crate::connection::SelfHostedProvider;
     use crate::settings::Settings;
@@ -3437,7 +3464,7 @@ mod tests {
             Some(serde_json::json!({"asr_backend": "my_voice_fast"})),
             "新しい方法が効いていること"
         );
-        assert!(controller.to_asr.is_none(), "張ってある接続を切ること");
+        assert!(controller.asr.is_none(), "張ってある接続を切ること");
         drop(asr_commands);
     }
 
@@ -3524,7 +3551,7 @@ mod tests {
         assert!(controller.warmup_in_progress);
         assert!(controller.deferred_speech.is_some());
         assert_eq!(controller.session.state(), SessionState::Listening);
-        assert!(controller.to_asr.is_none());
+        assert!(controller.asr.is_none());
         assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
@@ -4101,7 +4128,7 @@ mod tests {
     ) -> (Controller, crossbeam_channel::Receiver<AsrCommand>) {
         let mut controller = test_controller(settings);
         let (to_asr, asr_commands) = crossbeam_channel::unbounded();
-        controller.to_asr = Some(to_asr);
+        controller.asr = Some(AsrTransport::for_test(to_asr));
         assert!(controller.session.apply(SessionInput::Enable));
         assert!(controller.session.apply(SessionInput::SpeechStarted));
         assert!(controller.session.apply(SessionInput::Connected));
@@ -4499,7 +4526,7 @@ mod tests {
         });
         let mut controller = test_controller(settings);
         let (to_asr, _asr_commands) = crossbeam_channel::unbounded();
-        controller.to_asr = Some(to_asr);
+        controller.asr = Some(AsrTransport::for_test(to_asr));
         assert!(controller.session.apply(SessionInput::Enable));
         assert!(controller.session.apply(SessionInput::SpeechStarted));
         assert!(controller.session.apply(SessionInput::Connected));
@@ -5066,7 +5093,7 @@ mod tests {
         });
         let mut controller = test_controller(settings);
         let (to_asr, asr_commands) = crossbeam_channel::unbounded();
-        controller.to_asr = Some(to_asr);
+        controller.asr = Some(AsrTransport::for_test(to_asr));
         assert!(controller.session.apply(SessionInput::Enable));
         assert!(controller.session.apply(SessionInput::SpeechStarted));
         assert!(controller.session.apply(SessionInput::Connected));
