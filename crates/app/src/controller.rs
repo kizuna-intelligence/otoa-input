@@ -193,16 +193,6 @@ enum GateState {
     Speaking,
 }
 
-/// 端末の VAD が無音を検知してから、サーバーの確定応答を待っている発話。
-///
-/// 第1段では既存挙動を保つため常に高々一件だけを入れる。第3段で
-/// `SpeechStarted` ごとの世代と複数待機へ切り替える。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Wait {
-    epoch: u64,
-    started_at: Instant,
-}
-
 #[derive(Debug, Clone)]
 enum NoticeKind {
     Asr,
@@ -231,7 +221,17 @@ struct Facts {
     gate: GateState,
     warmup: Option<Instant>,
     /// 第1段では旧来どおり一件だけ。第3段で FIFO として有効化する。
-    pending: VecDeque<Wait>,
+    /// サーバーへ音声を送ってから、**まだ何も返ってきていない**時間の起点。
+    ///
+    /// 行列ではない。実装も空のときしか積んでいなかったので常に 0/1 件で、
+    /// `epoch` は記録に出すだけで応答との照合に一度も使っていなかった
+    /// （サーバーの応答に epoch も request id も無いので、持っても対応が付かない）。
+    ///
+    /// **サーバーから何か届いたら必ず解ける。** 途中結果でも解ける。以前は
+    /// `PartialText` で解かなかったため、応答が届いているのに古い起点が居座り、
+    /// 10 秒を超えて「サーバーを起動しています」に変わっていた。喋り続けている
+    /// のに出る、という形で実際に起きた（epoch 21 が 26 秒残った）。
+    pending_since: Option<Instant>,
     commit: Option<(String, Instant)>,
     notice: Option<Notice>,
     error: Option<UserError>,
@@ -287,8 +287,8 @@ fn view(facts: &Facts, now: Instant) -> OverlayView {
         return blank_overlay(OverlayKind::WarmingUp);
     }
 
-    if let Some(wait) = facts.pending.front() {
-        let elapsed = now.saturating_duration_since(wait.started_at);
+    if let Some(since) = facts.pending_since {
+        let elapsed = now.saturating_duration_since(since);
         if elapsed >= SERVER_RESPONSE_STARTING_OVERLAY_DELAY {
             return blank_overlay(OverlayKind::StartingServer);
         }
@@ -408,8 +408,6 @@ pub struct Controller {
     pub(crate) to_ui: Sender<UiUpdate>,
     pub(crate) text_out: TextOutput,
     facts: Facts,
-    /// `SpeechStarted` ごとの通し番号。応答順を待機 FIFO と対応付けるために記録する。
-    epoch: u64,
     /// 前回描画した値。表示理由は保持せず、Facts から導出した結果の重複送信を抑える。
     overlay: OverlayView,
     /// 第1・第2段のテストが直接観測している期限。製品の表示状態には使わない。
@@ -588,14 +586,13 @@ impl Controller {
                 session: SessionState::Disabled,
                 gate: GateState::Idle,
                 warmup: None,
-                pending: VecDeque::new(),
+                pending_since: None,
                 commit: None,
                 notice: None,
                 error: None,
                 partial: None,
                 finalizing: false,
             },
-            epoch: 0,
             // 起動直後はロゴを見せる。main の既定に合わせる。
             overlay: OverlayView::Splash,
             #[cfg(test)]
@@ -1167,7 +1164,7 @@ impl Controller {
     /// 応答が来たか、待ちが無くなったら終わる。
     fn waiting_after_warmup(&mut self) -> Option<Instant> {
         let started_at = self.warmup_until_response?;
-        if self.facts.pending.is_empty() || self.facts.partial.is_some() {
+        if self.facts.pending_since.is_none() || self.facts.partial.is_some() {
             self.warmup_until_response = None;
             return None;
         }
@@ -1509,7 +1506,6 @@ impl Controller {
         match event {
             GateEvent::SpeechStarted => {
                 tracing::debug!(target: "otoa_input", "gate: speech started");
-                self.epoch = self.epoch.wrapping_add(1);
                 self.facts.gate = GateState::Speaking;
                 self.client_finalize_sent = false;
                 // 利用者が次を喋り始めていても、届いていない応答は前の発話の
@@ -1729,7 +1725,14 @@ impl Controller {
                     "paused server ASR audio after deferred endpoint"
                 );
             }
-            self.start_server_response_wait();
+            // **サーバーが先に終話を告げていたら、待ちを作らない。**
+            // 端末の VAD より先に `<end>` が届くことがある。そのとき新しい
+            // 待ちを作ると、対応する応答はもう来ないので永久に残り、以後
+            // どれだけ喋っても経過時間だけが伸びて
+            // 「サーバーを起動しています」に届いてしまう（26 秒残った実例がある）。
+            if !self.pending_completed_by_endpoint {
+                self.start_server_response_wait();
+            }
         } else if self.settings.endpoint_mode == "client" {
             let reason = if self.session.state() != SessionState::Streaming {
                 "session is not streaming"
@@ -1880,61 +1883,44 @@ impl Controller {
         true
     }
 
+    /// サーバーの応答を待ち始めた。既に待っているなら起点は動かさない。
     fn start_server_response_wait(&mut self) {
-        if !self.facts.pending.is_empty() {
+        if self.facts.pending_since.is_some() {
             return;
         }
-        let wait = Wait {
-            epoch: self.epoch,
-            started_at: Instant::now(),
-        };
-        self.facts.pending.push_back(wait);
+        self.facts.pending_since = Some(Instant::now());
         self.sync_pending_wait_observer();
-        tracing::debug!(
-            target: "otoa_input",
-            epoch = wait.epoch,
-            pending = self.facts.pending.len(),
-            "サーバー応答待ちを積んだ"
-        );
+        tracing::debug!(target: "otoa_input", "サーバー応答待ちを始めた");
     }
 
     /// 発話が次へ進んでも、既に表示しているサーバー応答待ちを保持したことを記録する。
     /// gate event ごとに高頻度で出るものではないため、再表示・タイマー再始動の抑制を
     /// 実機ログから追える。
+    /// 発話が次へ進んでも、既に始まっている応答待ちを引き継いだことを記録する。
     fn log_server_response_wait_kept(&self, reason: &'static str) {
-        let Some(wait) = self.facts.pending.front() else {
+        let Some(since) = self.facts.pending_since else {
             return;
         };
-        let elapsed = wait.started_at.elapsed();
-        let phase = if elapsed >= SERVER_RESPONSE_STARTING_OVERLAY_DELAY {
-            "server-starting"
-        } else if elapsed >= SERVER_RESPONSE_WAITING_OVERLAY_DELAY {
-            "recognizing"
-        } else {
-            "pending"
-        };
+        let elapsed = since.elapsed();
         tracing::info!(
             target: "otoa_input",
-            epoch = wait.epoch,
             elapsed_ms = elapsed.as_millis() as u64,
-            phase,
             reason,
             "overlay: waiting kept"
         );
     }
 
-    /// 確定応答が来たので待ちを解く。**行列を空にする**(1 対 1 ではないため)。
+    /// サーバーから何か届いたので待ちを解く。
+    ///
+    /// **途中結果でも解く。** 届いている以上、待たせている理由は無い。
     fn complete_pending_wait(&mut self, reason: &'static str) -> bool {
-        let Some(wait) = self.facts.pending.pop_front() else {
+        let Some(since) = self.facts.pending_since.take() else {
             self.sync_pending_wait_observer();
             return false;
         };
-        self.facts.pending.clear();
         tracing::debug!(
             target: "otoa_input",
-            epoch = wait.epoch,
-            elapsed_ms = wait.started_at.elapsed().as_millis() as u64,
-            remaining = 0,
+            elapsed_ms = since.elapsed().as_millis() as u64,
             reason,
             "サーバー応答待ちが解けた"
         );
@@ -1942,17 +1928,12 @@ impl Controller {
         true
     }
 
-    /// セッションの終了・切断時には、対応先を失った待機をすべて取り除く。
+    /// セッションの終了・切断時には、対応先を失った待機を取り除く。
     fn clear_pending_waits(&mut self, reason: &'static str) {
-        if !self.facts.pending.is_empty() {
-            tracing::debug!(
-                target: "otoa_input",
-                pending = self.facts.pending.len(),
-                reason,
-                "サーバー応答待ちを空にした"
-            );
+        if self.facts.pending_since.is_some() {
+            tracing::debug!(target: "otoa_input", reason, "サーバー応答待ちを空にした");
         }
-        self.facts.pending.clear();
+        self.facts.pending_since = None;
         self.pending_completed_by_final_text = false;
         self.pending_completed_by_endpoint = false;
         self.sync_pending_wait_observer();
@@ -1967,15 +1948,8 @@ impl Controller {
 
     #[cfg(test)]
     fn import_pending_wait_override_for_test(&mut self) {
-        let Some(started_at) = self.server_response_wait_started_at else {
-            return;
-        };
-        match self.facts.pending.front_mut() {
-            Some(wait) => wait.started_at = started_at,
-            None => self.facts.pending.push_back(Wait {
-                epoch: self.epoch,
-                started_at,
-            }),
+        if let Some(started_at) = self.server_response_wait_started_at {
+            self.facts.pending_since = Some(started_at);
         }
     }
 
@@ -1984,8 +1958,7 @@ impl Controller {
 
     #[cfg(test)]
     fn sync_pending_wait_observer(&mut self) {
-        self.server_response_wait_started_at =
-            self.facts.pending.front().map(|wait| wait.started_at);
+        self.server_response_wait_started_at = self.facts.pending_since;
         self.server_response_wait_overlay_visible = matches!(
             view(&self.facts, Instant::now()),
             OverlayView::Shown {
@@ -2125,6 +2098,11 @@ impl Controller {
                 // `<end>` の直後の notice だけを抑止する。次の通常応答は必ず
                 // partial（空でもよい）を含むので、ここで次の応答へ進める。
                 self.pending_completed_by_endpoint = false;
+                // **途中結果もサーバーからの応答である。** 解かないと、応答が
+                // 届いているのに古い起点が居座り、10 秒を超えて
+                // 「サーバーを起動しています」に変わる。喋り続けているのに出る、
+                // という形で実際に起きた。
+                self.complete_pending_wait("partial transcript received");
                 if self.client_finalize_sent && !self.gate.is_speaking() {
                     tracing::debug!(
                         target: "otoa_input",
@@ -2142,8 +2120,13 @@ impl Controller {
                     self.pending_completed_by_final_text = false;
                     self.pending_completed_by_endpoint = true;
                 } else {
-                    self.pending_completed_by_endpoint =
-                        self.complete_pending_wait("endpoint received");
+                    // **待ちが有ったかどうかではなく、サーバーが閉じたかを持つ。**
+                    // 端末の VAD より先に `<end>` が届くと、その時点では待ちが
+                    // 無いので解く相手がいない。ここで false のままにすると、
+                    // 直後の終話で新しい待ちを作ってしまい、対応する応答は
+                    // もう来ないので永久に残る。
+                    self.complete_pending_wait("endpoint received");
+                    self.pending_completed_by_endpoint = true;
                 }
                 self.finalize_pending = false;
                 self.last_speech_endpoint_at = Some(Instant::now());
@@ -2362,7 +2345,7 @@ impl Controller {
         if !idle_close_is_due(
             self.session.state(),
             self.gate.is_speaking(),
-            !self.facts.pending.is_empty(),
+            self.facts.pending_since.is_some(),
             self.last_speech_endpoint_at,
             self.settings.idle_close_sec,
             Instant::now(),
@@ -3658,6 +3641,73 @@ mod tests {
         );
     }
 
+    /// **途中結果が届いたら待ちを解く。**
+    ///
+    /// 解かないと、応答が届いているのに古い起点が居座り、10 秒を超えて
+    /// 「サーバーを起動しています」に変わる。喋り続けているのに出る、という
+    /// 形で実際に起きた。
+    #[test]
+    fn a_partial_result_ends_the_wait_for_the_server() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, _asr) = streaming_controller(settings);
+        end_speech(&mut controller);
+        age_oldest_pending_wait(&mut controller, SERVER_RESPONSE_STARTING_OVERLAY_DELAY);
+
+        controller.handle_asr_event(AsrEvent::PartialText(vec![AsrToken {
+            text: "とちゅう".to_string(),
+            start_ms: None,
+            end_ms: None,
+            confidence: None,
+            is_final: false,
+            speaker: None,
+            language: None,
+            translation_status: None,
+            source_language: None,
+        }]));
+
+        assert!(
+            controller.facts.pending_since.is_none(),
+            "途中結果が届いたのに待ちが残っている"
+        );
+        controller.check_server_response_wait_overlay();
+        assert!(
+            !matches!(
+                controller.overlay,
+                OverlayView::Shown {
+                    kind: OverlayKind::StartingServer,
+                    ..
+                }
+            ),
+            "応答が届いているのにサーバー起動中を出している"
+        );
+    }
+
+    /// **サーバーが先に終話を告げたら、待ちを作り直さない。**
+    ///
+    /// 端末の VAD より先に `<end>` が届くことがある。そこで新しい待ちを作ると、
+    /// 対応する応答はもう来ないので永久に残る。
+    #[test]
+    fn a_server_endpoint_before_the_gate_does_not_open_a_new_wait() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, _asr) = streaming_controller(settings);
+
+        controller.handle_asr_event(AsrEvent::Endpoint);
+        end_speech(&mut controller);
+
+        assert!(
+            controller.facts.pending_since.is_none(),
+            "サーバーが答えた後に待ちを作っている"
+        );
+    }
+
     /// **暖機が返らないときに、喋ったぶんを飲み続けない。**
     ///
     /// 登録は普段 0.3 秒で終わる。返らない日に待ち続けると、その間の発話は
@@ -4066,12 +4116,11 @@ mod tests {
     }
 
     fn age_oldest_pending_wait(controller: &mut Controller, elapsed: Duration) {
-        controller
-            .facts
-            .pending
-            .front_mut()
-            .expect("無音の検知で応答待ちが積まれるはず")
-            .started_at = Instant::now() - elapsed;
+        assert!(
+            controller.facts.pending_since.is_some(),
+            "無音の検知で応答待ちが始まるはず"
+        );
+        controller.facts.pending_since = Some(Instant::now() - elapsed);
         controller.sync_pending_wait_observer();
     }
 
@@ -4543,21 +4592,12 @@ mod tests {
 
         end_speech(&mut controller);
         age_oldest_pending_wait(&mut controller, SERVER_RESPONSE_WAITING_OVERLAY_DELAY);
-        let first_started_at = controller
-            .facts
-            .pending
-            .front()
-            .expect("first wait")
-            .started_at;
+        let first_started_at = controller.facts.pending_since.expect("first wait");
         controller.check_server_response_wait_overlay();
 
         assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
         controller.handle_gate_event(GateEvent::SpeechStarted);
-        assert_eq!(controller.facts.pending.len(), 1);
-        assert_eq!(
-            controller.facts.pending.front().unwrap().started_at,
-            first_started_at
-        );
+        assert_eq!(controller.facts.pending_since, Some(first_started_at));
         assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
@@ -4568,11 +4608,7 @@ mod tests {
 
         end_speech(&mut controller);
         // 積み増さない。開始時刻は「待っていない状態から最初に送った時刻」を保つ。
-        assert_eq!(controller.facts.pending.len(), 1);
-        assert_eq!(
-            controller.facts.pending.front().unwrap().started_at,
-            first_started_at
-        );
+        assert_eq!(controller.facts.pending_since, Some(first_started_at));
     }
 
     #[test]
@@ -4587,12 +4623,12 @@ mod tests {
         let (mut controller, asr_commands) = streaming_controller(settings);
 
         end_speech(&mut controller);
-        let first_epoch = controller.facts.pending.front().expect("first wait").epoch;
+        let first_since = controller.facts.pending_since.expect("first wait");
 
         assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
         controller.handle_gate_event(GateEvent::SpeechStarted);
         end_speech(&mut controller);
-        let second_epoch = controller.facts.pending.front().expect("second wait").epoch;
+        let second_since = controller.facts.pending_since.expect("second wait");
 
         assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
         controller.handle_gate_event(GateEvent::SpeechStarted);
@@ -4604,8 +4640,8 @@ mod tests {
         // まとめられる。1 対 1 に数えると行列が伸び続け、先頭が古いまま残って
         // 待ち表示が消えなくなる(実機で発生)。したがって 2 回目以降は積み増さず、
         // 応答が来れば空にする。
-        assert_eq!(first_epoch, second_epoch);
-        assert!(controller.facts.pending.is_empty());
+        assert_eq!(first_since, second_since, "次の発話で待ちを作り直している");
+        assert!(controller.facts.pending_since.is_none());
         assert!(matches!(
             controller.overlay,
             OverlayView::Shown {
