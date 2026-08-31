@@ -376,7 +376,6 @@ fn blank_overlay(kind: OverlayKind) -> OverlayView {
 
 #[derive(Clone, Copy, Debug)]
 enum WarmupReason {
-    Startup,
     /// 最初の発話の直前。登録が古いので、喋り出しを待たせて入れ直す。
     BeforeSpeech,
     /// 設定で接続先が変わった直後。
@@ -396,7 +395,6 @@ enum WarmupReason {
 impl WarmupReason {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Startup => "startup",
             Self::BeforeSpeech => "before_speech",
             Self::SettingsChanged => "settings_changed",
             Self::VoiceChanged => "voice_changed",
@@ -3477,10 +3475,10 @@ mod tests {
     }
 
     #[test]
-    fn startup_warmup_shows_the_warming_overlay_until_it_finishes() {
+    fn the_warming_overlay_stays_until_the_warmup_finishes() {
         let (mut controller, calls) = warmup_controller(Settings::default());
 
-        assert!(controller.start_warmup(WarmupReason::Startup));
+        assert!(controller.start_warmup(WarmupReason::BeforeSpeech));
         assert!(controller.warmup.is_some());
         assert_eq!(
             controller.overlay,
@@ -3819,7 +3817,6 @@ mod tests {
         );
     }
 
-
     /// **声を録り直したら、その場で登録し直す。**
     ///
     /// 録り直しは設定を変えないので、接続先が変わったことにはならない。
@@ -3880,7 +3877,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn temporary_warmup_failure_returns_to_a_retryable_state() {
         let (mut controller, _calls) = warmup_controller(Settings::default());
@@ -3895,7 +3891,7 @@ mod tests {
         });
 
         controller.finish_warmup(WarmupResult {
-            reason: WarmupReason::Startup,
+            reason: WarmupReason::BeforeSpeech,
             started_at: Instant::now(),
             result: Err(anyhow::anyhow!("gateway timed out while starting")),
         });
@@ -3960,7 +3956,6 @@ mod tests {
         );
         assert_eq!(next_enroll_retry_delay(ENROLL_RETRY_MAX), ENROLL_RETRY_MAX);
     }
-
 
     #[test]
     fn missing_enrollment_is_the_only_persistent_enrollment_error() {
@@ -5222,7 +5217,6 @@ mod tests {
 mod warmup_on_settings_change_tests {
     use super::{WarmupReason, WARMUP_IDLE_THRESHOLD};
 
-
     /// 切り替えて保存した直後に暖機を打つ理由が、ログから追えること。
     #[test]
     fn the_reason_has_its_own_name() {
@@ -5234,7 +5228,7 @@ mod warmup_on_settings_change_tests {
         );
         assert_ne!(
             WarmupReason::SettingsChanged.as_str(),
-            WarmupReason::Startup.as_str()
+            WarmupReason::VoiceChanged.as_str()
         );
     }
 }
