@@ -268,7 +268,6 @@ enum UserError {
 /// この値から [`view`] で求める。
 #[derive(Debug, Clone)]
 struct Facts {
-    session: SessionState,
     gate: GateState,
     warmup: Option<Instant>,
     /// 第1段では旧来どおり一件だけ。第3段で FIFO として有効化する。
@@ -585,8 +584,6 @@ pub struct Controller {
     last_text_ui: Option<Instant>,
     audio_capture: Option<AudioCapture>,
     pending_settings: Option<Settings>,
-    /// 保留中の設定が効いたら暖機を打つか。接続先が変わったときだけ立てる。
-    warmup_after_pending_settings: bool,
     /// このセッションで名乗られるべき方法。`None` なら確認しない。
     ///
     /// **確認できるまで転写を受け取らない。** 指定を知らないサーバーは、
@@ -629,7 +626,6 @@ impl Controller {
             to_ui,
             text_out,
             facts: Facts {
-                session: SessionState::Disabled,
                 gate: GateState::Idle,
                 warmup: None,
                 pending_since: None,
@@ -700,7 +696,6 @@ impl Controller {
             last_text_ui: None,
             audio_capture: None,
             pending_settings: None,
-            warmup_after_pending_settings: false,
             expected_backend: None,
             // 接続のたびに Connected で決め直す。**それまでは確認済みとして扱う。**
             // 既定を未確認にすると、確認する必要のない構成でも文字を捨ててしまう。
@@ -2733,7 +2728,6 @@ impl Controller {
     /// 表示に依存する実行時の事実だけを更新する。期限・待機列はここで復元せず、
     /// それぞれのイベントが Facts を直接更新する。
     fn refresh_runtime_facts(&mut self) {
-        self.facts.session = self.session.state();
         self.facts.gate = if self.gate.is_speaking() {
             GateState::Speaking
         } else {
@@ -2960,11 +2954,6 @@ impl Controller {
         configure_text_output(&mut self.text_out, &settings);
         self.settings = settings;
         self.rebuild_vad_configuration();
-        if std::mem::take(&mut self.warmup_after_pending_settings) {
-            // 保留していた設定が効いたときも、接続を張り直す。理由は同じ。
-            self.cleanup_asr();
-            let _ = self.start_warmup(WarmupReason::SettingsChanged);
-        }
         if was_enabled && !self.settings.listening_enabled {
             self.disable_listening();
         }
