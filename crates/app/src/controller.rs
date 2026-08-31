@@ -117,7 +117,7 @@ impl WarmupJob {
 }
 
 /// ASR への接続一式。生まれるときも消えるときも 3 つ揃っている。
-struct AsrTransport {
+pub(crate) struct AsrTransport {
     to_asr: Sender<AsrCommand>,
     events: Receiver<AsrEvent>,
     thread: thread::JoinHandle<()>,
@@ -5215,7 +5215,7 @@ mod tests {
 
 #[cfg(test)]
 mod warmup_on_settings_change_tests {
-    use super::{WarmupReason, WARMUP_IDLE_THRESHOLD};
+    use super::WarmupReason;
 
     /// 切り替えて保存した直後に暖機を打つ理由が、ログから追えること。
     #[test]
