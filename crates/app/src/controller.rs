@@ -88,6 +88,14 @@ struct DeferredSpeech {
     ended: bool,
 }
 
+/// 暖機に待たされて始まった発話。
+struct DelayedTurn {
+    /// 暖機を始めた時刻。準備中の表示はここから地続きにする。
+    began_at: Instant,
+    /// 端末の VAD が終話まで見届けていたか。
+    speech_ended: bool,
+}
+
 /// 走っている暖機。生まれるときも消えるときも一式で動く。
 struct WarmupJob {
     started_at: Instant,
@@ -485,24 +493,15 @@ pub struct Controller {
     /// できていた。持ち主を 1 つにして、消すか送るかを [`DeferredSpeech`] の
     /// 有無だけで決める。
     deferred_speech: Option<DeferredSpeech>,
-    /// 保留していた発話で ASR を開始したとき、Connected になったら端末側で
-    /// 終話を確定する（endpoint_mode=client のときだけ）。
-    finish_after_deferred_warmup_connect: bool,
     /// 待受に入ってから 1 回は登録したか。**起動のたびに 1 回は必ず通す。**
     warmed_since_listening: bool,
-    /// この発話は暖機に待たされたので、**貼り付けずクリップボードに置くだけ**にする。
+    /// 暖機に待たされて始まった発話。**その発話が片付くまでの間だけ生きる。**
     ///
-    /// 暖機と接続で数秒かかることがあり、その間に利用者は別の窓へ移っている。
-    /// そこへ貼ると、貼りたくない場所へ文字が入る。取り消せないので、結果が
-    /// 遅れたときは自分で貼ってもらう。
-    hold_paste_after_warmup: bool,
-    /// 保留した発話で始めた接続が、まだ最初の応答を返していない。
-    ///
-    /// **待たせているあいだは、ひと続きの「準備中」として見せる。** 暖機が
-    /// 終わった瞬間に表示を落とすと、実際はまだ待たせているのに「認識中」に
-    /// 変わり、数秒後にまた「サーバーを起動しています」に変わる。1 つの状態が
-    /// 3 つの文言を行き来して見える。
-    warmup_until_response: Option<Instant>,
+    /// 「終話まで見届けたか」「準備中の表示をいつから出しているか」「貼らずに
+    /// クリップボードへ置くか」を別々の旗で持っていたときは、消し忘れた旗が
+    /// 次の無関係な発話へ漏れた。持ち主を発話ひとつにして、片付けと同時に
+    /// 必ず消えるようにする。
+    delayed_turn: Option<DelayedTurn>,
     /// サーバーが名乗った「認識器が寝るまでの時間」。
     /// 届いていなければ [`WARMUP_IDLE_THRESHOLD`] を使う。
     server_warmup_after: Option<Duration>,
@@ -652,10 +651,8 @@ impl Controller {
             warmup_retry_delay: ENROLL_RETRY_INITIAL,
             last_successful_asr_response_at: None,
             deferred_speech: None,
-            finish_after_deferred_warmup_connect: false,
+            delayed_turn: None,
             warmed_since_listening: false,
-            hold_paste_after_warmup: false,
-            warmup_until_response: None,
             server_warmup_after: None,
             gate,
             preroll,
@@ -1076,7 +1073,7 @@ impl Controller {
     /// 停止・接続先の変更・利用者の操作待ちなど、送る先が無い場合である。
     fn clear_deferred_warmup_speech(&mut self) {
         self.deferred_speech = None;
-        self.finish_after_deferred_warmup_connect = false;
+        self.delayed_turn = None;
     }
 
     /// 保留していた発話で接続を続ける。保留が無ければ何もしない。
@@ -1095,14 +1092,15 @@ impl Controller {
         {
             return;
         }
-        self.finish_after_deferred_warmup_connect = speech_ended;
-        // ここから最初の応答までは、暖機と地続きの「準備中」として見せる。
-        self.warmup_until_response = Some(
-            self.warmup
+        // ここから結果までは、暖機と地続きの「準備中」として見せ、貼らずに
+        // クリップボードへ置く。待たせているあいだに利用者は別の窓へ移っている。
+        self.delayed_turn = Some(DelayedTurn {
+            began_at: self
+                .warmup
                 .as_ref()
                 .map_or_else(Instant::now, |job| job.started_at),
-        );
-        self.hold_paste_after_warmup = true;
+            speech_ended,
+        });
         if let Err(error) = self.start_asr_after_speech_started(preroll, speech_audio) {
             if self.session.state() != SessionState::Disabled {
                 let message = error.to_string();
@@ -1175,9 +1173,9 @@ impl Controller {
     ///
     /// 応答が来たか、待ちが無くなったら終わる。
     fn waiting_after_warmup(&mut self) -> Option<Instant> {
-        let started_at = self.warmup_until_response?;
+        let started_at = self.delayed_turn.as_ref()?.began_at;
         if self.facts.pending_since.is_none() || self.facts.partial.is_some() {
-            self.warmup_until_response = None;
+            self.delayed_turn = None;
             return None;
         }
         Some(started_at)
@@ -2067,8 +2065,11 @@ impl Controller {
                     }
                 }
                 self.send_ui(UiUpdate::State(SessionState::Streaming));
-                if self.finish_after_deferred_warmup_connect {
-                    self.finish_after_deferred_warmup_connect = false;
+                // 保留の時点で終話まで見届けていたなら、繋がった時点で確定へ進める。
+                // **待たせた印は消さない。** 結果を貼らずに置くところまでが
+                // この発話の扱いである。
+                if let Some(turn) = self.delayed_turn.as_mut().filter(|t| t.speech_ended) {
+                    turn.speech_ended = false;
                     self.finish_current_speech();
                 } else {
                     self.refresh_overlay();
@@ -2480,7 +2481,7 @@ impl Controller {
         self.show_committed_text(text.clone());
         // 暖機に待たされた発話は貼らない。待っているあいだに利用者は別の窓へ
         // 移っていることがあり、そこへ貼ると取り消せない。
-        let method = if std::mem::take(&mut self.hold_paste_after_warmup) {
+        let method = if self.delayed_turn.take().is_some() {
             tracing::info!(
                 target: "otoa_input",
                 "暖機で待たせた発話なので、貼らずにクリップボードへ置いた"
@@ -2641,6 +2642,8 @@ impl Controller {
     }
 
     fn show_overlay_notice(&mut self, code: String, message: String) {
+        // 通知で終わった発話も、その発話の扱いはここで終わる。
+        self.delayed_turn = None;
         self.complete_pending_wait("notice received");
         self.show_overlay_notice_after_response(code, message);
     }
@@ -2978,6 +2981,9 @@ impl Controller {
     }
 
     fn cleanup_asr(&mut self) {
+        // **待たせた印は、その発話と一緒に消える。** 消し損ねると、次の
+        // 無関係な発話が貼られずクリップボードにだけ入る。
+        self.delayed_turn = None;
         self.clear_pending_waits("ASR session cleaned up");
         self.finalize_pending = false;
         self.client_finalize_sent = false;
@@ -3180,8 +3186,8 @@ mod tests {
         apply_input_gain, combine_readiness, failed_retry_is_due, gate_from_settings,
         idle_close_is_due, is_loopback_host, is_nonfatal_asr_error, is_user_action_failure_message,
         level_status, next_enroll_retry_delay, next_failed_retry_delay, resolve_paste_shortcut,
-        AsrTransport, Controller, LevelStatus, OverlayKind, OverlayView, WarmupJob, WarmupReason,
-        WarmupResult, ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL,
+        AsrTransport, Controller, DelayedTurn, LevelStatus, OverlayKind, OverlayView, WarmupJob,
+        WarmupReason, WarmupResult, ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL,
         FAILED_RETRY_MAX, GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION,
         PENDING_AUDIO_MAX_BYTES, SERVER_RESPONSE_STARTING_OVERLAY_DELAY,
         SERVER_RESPONSE_WAITING_OVERLAY_DELAY, WARMUP_DEFER_DEADLINE, WARMUP_IDLE_THRESHOLD,
@@ -3610,25 +3616,35 @@ mod tests {
         );
     }
 
-    /// **暖機に待たされた発話は貼らない。**
+    /// **待たせた印を、次の発話へ漏らさない。**
     ///
-    /// 暖機と接続で数秒かかることがあり、その間に利用者は別の窓へ移っている。
-    /// そこへ貼ると、貼りたくない場所へ文字が入る。取り消せない。
+    /// 印は「その発話を貼らずにクリップボードへ置く」ためのもので、結果が
+    /// 出ないまま終わったら一緒に消えなければならない。消し損ねると、次の
+    /// 無関係な発話が貼られなくなる。旗を 3 つに分けて持っていたときは、
+    /// 通知・空結果・接続失敗・停止のどれでも消えなかった。
     #[test]
-    fn a_result_held_by_the_warmup_is_not_pasted() {
+    fn a_delayed_turn_does_not_leak_into_the_next_speech() {
         let (mut controller, _calls) = warmup_controller(Settings::default());
-        controller.last_confident_speech_at = Some(Instant::now());
         assert!(controller.session.apply(SessionInput::Enable));
-        controller.last_successful_asr_response_at = Some(Instant::now() - WARMUP_IDLE_THRESHOLD);
-        controller.preroll.push(&[2_i16; 160]);
+        controller.delayed_turn = Some(DelayedTurn {
+            began_at: Instant::now(),
+            speech_ended: false,
+        });
 
-        controller.handle_gate_event(GateEvent::SpeechStarted);
-        assert!(controller.deferred_speech.is_some());
-        wait_for_warmup(&mut controller);
-
+        controller.show_overlay_notice("gate_blocked".to_string(), "一致しません".to_string());
         assert!(
-            controller.hold_paste_after_warmup,
-            "待たせた発話に貼り付け保留の印が付いていない"
+            controller.delayed_turn.is_none(),
+            "通知で終わったのに印が残っている"
+        );
+
+        controller.delayed_turn = Some(DelayedTurn {
+            began_at: Instant::now(),
+            speech_ended: false,
+        });
+        controller.cleanup_asr();
+        assert!(
+            controller.delayed_turn.is_none(),
+            "接続を落としたのに印が残っている"
         );
     }
 
