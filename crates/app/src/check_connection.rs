@@ -295,7 +295,9 @@ impl EventCounts {
             AsrEvent::Finished => EventKind::Finished,
             AsrEvent::Closed { .. } => return None,
             // 名乗りは診断の数え上げでは通知と同じ扱いでよい。**利用者には出さない。**
-            AsrEvent::Notice { .. } | AsrEvent::Backend(_) => EventKind::Notice,
+            AsrEvent::Notice { .. } | AsrEvent::Backend(_) | AsrEvent::WarmupAfter(_) => {
+                EventKind::Notice
+            }
             AsrEvent::Failed(_) => EventKind::Failed,
         };
         self.0[kind as usize] += 1;

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{AsrError, AsrEvent};
 
 /// server から届く 1 レスポンス。
@@ -34,6 +36,15 @@ pub struct AsrResponse {
     /// 捨てるだけで、何も起こらない。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+
+    /// 認識器が寝るまでの秒数。**サーバーが決めて、クライアントへ伝える。**
+    ///
+    /// 暖機の間隔をクライアントに定数で持たせると、向こうの構成が変わった日に
+    /// 黙って合わなくなる。実際、当時の配備に合わせた 60 秒を持っていたあいだに
+    /// 認識器の側は寝ない構成へ移っており、根拠が失われていた。知らない版は
+    /// このフィールドを捨て、従来の既定で動く。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warmup_after_secs: Option<u64>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -94,7 +105,11 @@ pub(crate) fn parse_response(text: &str) -> Result<Vec<AsrEvent>, AsrError> {
 
     if let Some(backend) = response.backend.as_ref() {
         // 機械向けの値なので、tokens とも notice とも混ぜない。
-        return Ok(vec![AsrEvent::Backend(backend.clone())]);
+        let mut events = vec![AsrEvent::Backend(backend.clone())];
+        if let Some(secs) = response.warmup_after_secs {
+            events.push(AsrEvent::WarmupAfter(Duration::from_secs(secs)));
+        }
+        return Ok(events);
     }
 
     if let (Some(code), Some(message)) = (
