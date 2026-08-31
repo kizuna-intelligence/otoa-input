@@ -6,7 +6,8 @@ mod settings;
 mod transcript;
 
 pub use connection::{
-    Account, ConnectionProvider, Endpoint, EnrollOutcome, EnrollReason, PrepareAction, Readiness,
+    Account, ConnectionControl, ConnectionProvider, Endpoint, EnrollOutcome, EnrollReason,
+    PrepareAction, Readiness,
 };
 pub use gate::{GateEvent, SpeechGate};
 pub use preroll::PreRoll;

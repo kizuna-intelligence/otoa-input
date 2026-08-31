@@ -81,6 +81,7 @@ fn endpoint_with_auth_token(url: String, auth_token: Option<String>) -> Endpoint
         // endpoint now has a header, callers deliberately omit it from the
         // protocol config and use Authorization as the source of truth.
         api_key: auth_token,
+        control: None,
     }
 }
 
