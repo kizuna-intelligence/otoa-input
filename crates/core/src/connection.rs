@@ -9,6 +9,35 @@ pub struct Endpoint {
     pub headers: Vec<(String, String)>,
     /// A protocol-level API key, when the selected server expects one.
     pub api_key: Option<String>,
+    /// Optional neutral HTTP control surface for a direct speech connection.
+    pub control: Option<ConnectionControl>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConnectionControl {
+    pub status_url: String,
+    pub complete_url: String,
+    pub headers: Vec<(String, String)>,
+    pub poll_interval_ms: u64,
+}
+
+impl fmt::Debug for ConnectionControl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionControl")
+            .field("status_url", &self.status_url)
+            .field("complete_url", &self.complete_url)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| (name.as_str(), "***"))
+                    .collect::<Vec<_>>(),
+            )
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .finish()
+    }
 }
 
 impl fmt::Debug for Endpoint {
@@ -23,6 +52,7 @@ impl fmt::Debug for Endpoint {
             .field("url", &self.url)
             .field("headers", &headers)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("control", &self.control)
             .finish()
     }
 }
@@ -144,6 +174,15 @@ mod tests {
                 ("X-Api-Key".to_string(), "header-secret".to_string()),
             ],
             api_key: Some("config-secret".to_string()),
+            control: Some(super::ConnectionControl {
+                status_url: "https://session.example/v1/speech-sessions/id".to_string(),
+                complete_url: "https://session.example/v1/speech-sessions/id/complete".to_string(),
+                headers: vec![(
+                    "Authorization".to_string(),
+                    "Bearer control-secret".to_string(),
+                )],
+                poll_interval_ms: 2_000,
+            }),
         };
 
         let debug = format!("{endpoint:?}");
@@ -154,5 +193,6 @@ mod tests {
         assert!(!debug.contains("handshake-secret"));
         assert!(!debug.contains("header-secret"));
         assert!(!debug.contains("config-secret"));
+        assert!(!debug.contains("control-secret"));
     }
 }
