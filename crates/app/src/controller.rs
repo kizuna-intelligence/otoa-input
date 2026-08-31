@@ -19,7 +19,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 use url::Url;
 
-const PENDING_AUDIO_LIMIT: usize = 100;
+/// 接続ができるまで抱えておく音声の上限。**数ではなく長さで持つ。**
+///
+/// フレーム数で 100 に切っていたときは、VAD の 1 フレームが 32ms なので
+/// 約 3.2 秒しか入らなかった。**1 発話ぶんにも足りない。** 接続が少しでも
+/// 遅れると発話の頭から溢れ、古い順に黙って捨てるので、利用者からは
+/// 「喋っても何も起きない」に見える。遠隔に 4 秒の遅延を掛けて再現した
+/// ── 4 発話すべてが 1 文字も返らなかった（2026-08-31）。
+///
+/// 16kHz の s16 で 60 秒ぶんでも 1.9MB しかない。音声を失うより小さい。
+const PENDING_AUDIO_MAX_BYTES: usize = 16_000 * 2 * 60;
 const CONTROLLER_TICK: Duration = Duration::from_millis(100);
 const TEXT_UI_MIN_INTERVAL: Duration = Duration::from_millis(30);
 const AUDIO_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(1);
@@ -1799,19 +1808,20 @@ impl Controller {
     }
 
     fn queue_pending_audio(&mut self, bytes: Vec<u8>) {
-        if self.pending_audio.len() >= PENDING_AUDIO_LIMIT {
+        let mut buffered: usize = self.pending_audio.iter().map(Vec::len).sum();
+        while buffered + bytes.len() > PENDING_AUDIO_MAX_BYTES && !self.pending_audio.is_empty() {
             self.pending_audio_dropped_frames += 1;
             if self.pending_audio_dropped_frames == 1
                 || self.pending_audio_dropped_frames.is_multiple_of(10)
             {
                 tracing::warn!(
                     target: "otoa_input",
-                    pending_limit = PENDING_AUDIO_LIMIT,
+                    pending_limit_bytes = PENDING_AUDIO_MAX_BYTES,
                     dropped_frames = self.pending_audio_dropped_frames,
                     "ASR connection is not ready; dropping oldest pending audio frame"
                 );
             }
-            self.pending_audio.remove(0);
+            buffered -= self.pending_audio.remove(0).len();
         }
         self.pending_audio.push(bytes);
     }
@@ -3154,7 +3164,7 @@ mod tests {
         level_status, next_enroll_retry_delay, next_failed_retry_delay, resolve_paste_shortcut,
         Controller, LevelStatus, OverlayKind, OverlayView, WarmupReason, WarmupResult,
         ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
-        GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION, PENDING_AUDIO_LIMIT,
+        GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION, PENDING_AUDIO_MAX_BYTES,
         SERVER_RESPONSE_STARTING_OVERLAY_DELAY, SERVER_RESPONSE_WAITING_OVERLAY_DELAY,
         WARMUP_DEFER_DEADLINE, WARMUP_IDLE_THRESHOLD,
     };
@@ -4056,20 +4066,40 @@ mod tests {
         assert_eq!(&*amplified, &samples);
     }
 
+    /// **1 発話ぶんは必ず抱えられること。** フレーム数で切っていたときは
+    /// 約 3.2 秒しか入らず、接続が少しでも遅れると発話の頭から溢れて、
+    /// 古い順に黙って捨てていた。
     #[test]
-    fn pending_audio_limit_keeps_the_newest_frames_and_records_the_drop() {
+    fn pending_audio_holds_a_whole_utterance_while_the_connection_opens() {
         let mut controller = test_controller(Settings::default());
-        for value in 0..=PENDING_AUDIO_LIMIT {
-            controller.queue_pending_audio(vec![value as u8]);
+        // 16kHz s16 の 1 フレーム（32ms 相当）を 20 秒ぶん積む。
+        let frame = vec![0_u8; 512 * 2];
+        let frames_for_20s = (16_000 * 2 * 20) / frame.len();
+        for _ in 0..frames_for_20s {
+            controller.queue_pending_audio(frame.clone());
         }
 
-        assert_eq!(controller.pending_audio.len(), PENDING_AUDIO_LIMIT);
-        assert_eq!(controller.pending_audio.first(), Some(&vec![1]));
         assert_eq!(
-            controller.pending_audio.last(),
-            Some(&vec![PENDING_AUDIO_LIMIT as u8])
+            controller.pending_audio_dropped_frames, 0,
+            "20 秒ぶんで捨てている"
         );
+        assert_eq!(controller.pending_audio.len(), frames_for_20s);
+    }
+
+    /// 上限を超えたら、古い方から捨てて新しい方を残す。
+    #[test]
+    fn pending_audio_keeps_the_newest_audio_and_records_the_drop() {
+        let mut controller = test_controller(Settings::default());
+        let frame = vec![0_u8; PENDING_AUDIO_MAX_BYTES / 4];
+        for _ in 0..4 {
+            controller.queue_pending_audio(frame.clone());
+        }
+        assert_eq!(controller.pending_audio_dropped_frames, 0);
+
+        controller.queue_pending_audio(vec![7_u8; frame.len()]);
         assert_eq!(controller.pending_audio_dropped_frames, 1);
+        assert_eq!(controller.pending_audio.len(), 4);
+        assert_eq!(controller.pending_audio.last().map(|f| f[0]), Some(7));
     }
 
     #[test]
