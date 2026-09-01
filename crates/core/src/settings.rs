@@ -40,10 +40,11 @@ pub enum PasteShortcutSetting {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// 発話終了を誰が判定するか。`client`（既定）と `server`。
+    /// 発話終了を誰が判定するか。`client`（既定）、`server`、`both`。
     ///
     /// `client` は端末の Silero VAD が無音を検知した時点で `finalize` を送る。
     /// `server` はサーバーの `<end>` を待つ。
+    /// `both` はサーバーの終話を使いつつ、端末の無音でも未確定区間を閉じる。
     ///
     /// 既定が `client` なのは、待受を止めないために端末が必ず VAD を持ち、
     /// 発話の開始も終了も既に知っているからである。判定をサーバーにも持たせると

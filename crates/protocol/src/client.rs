@@ -13,6 +13,8 @@ pub const POLICY_VIOLATION_CLOSE_CODE: u16 = 1008;
 
 /// client → session へ送る指示。
 pub enum AsrCommand {
+    /// 新しい発話が始まったことを通知する。
+    SpeechStart,
     /// 生 PCM（16 kHz mono s16le のバイト列）。
     Audio(Vec<u8>),
     /// 手動確定を要求する。`{"type":"finalize"}` を送る。
@@ -125,6 +127,17 @@ fn run_session(
     'session: loop {
         for _ in 0..32 {
             match commands.try_recv() {
+                Ok(AsrCommand::SpeechStart) => {
+                    if let Err(error) = send_message(
+                        &mut ws,
+                        Message::Text(r#"{"type":"speech_start"}"#.to_string()),
+                    ) {
+                        send_failed(&events, error);
+                        failed = true;
+                        break 'session;
+                    }
+                    last_sent = Instant::now();
+                }
                 Ok(AsrCommand::Audio(bytes)) => {
                     if let Err(error) = send_message(&mut ws, Message::Binary(bytes)) {
                         send_failed(&events, error);
@@ -326,6 +339,44 @@ mod tests {
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
     use tungstenite::{accept, Message};
+
+    #[test]
+    fn speech_start_is_sent_as_a_control_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener.local_addr().expect("test address should exist");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("client should connect");
+            let mut websocket = accept(stream).expect("websocket handshake should succeed");
+            assert!(matches!(websocket.read().unwrap(), Message::Text(_)));
+            assert_eq!(
+                websocket.read().unwrap(),
+                Message::Text(r#"{"type":"speech_start"}"#.to_string())
+            );
+            assert_eq!(websocket.read().unwrap(), Message::Text(String::new()));
+            websocket
+                .send(Message::Text(r#"{"finished":true}"#.to_string()))
+                .unwrap();
+        });
+
+        let (to_session, commands) = crossbeam_channel::unbounded();
+        let (events, event_receiver) = crossbeam_channel::unbounded();
+        let client = AsrSession::spawn(
+            format!("ws://{address}/asr/v1"),
+            AsrConfig::realtime_pcm16k(None),
+            Vec::new(),
+            commands,
+            events,
+        )
+        .unwrap();
+        assert!(matches!(
+            event_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            AsrEvent::Connected
+        ));
+        to_session.send(AsrCommand::SpeechStart).unwrap();
+        to_session.send(AsrCommand::Stop).unwrap();
+        client.join().unwrap();
+        server.join().unwrap();
+    }
 
     #[test]
     fn notice_does_not_end_the_session() {
