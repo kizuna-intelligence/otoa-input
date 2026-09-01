@@ -1569,6 +1569,7 @@ impl Controller {
             GateEvent::SpeechStarted => {
                 tracing::debug!(target: "otoa_input", "gate: speech started");
                 self.facts.gate = GateState::Speaking;
+                let previous_turn_finalized = self.client_finalize_sent;
                 self.client_finalize_sent = false;
                 // 利用者が次を喋り始めていても、届いていない応答は前の発話の
                 // ものでありうる。サーバーが実際に答えるか、セッションが終わる
@@ -1646,6 +1647,22 @@ impl Controller {
                                 );
                                 self.send_audio(&preroll);
                             }
+                        }
+                        self.refresh_overlay()
+                    }
+                    SessionState::Connecting if previous_turn_finalized => {
+                        // WebSocket の接続確立前でも、前の発話の Audio と Finalize は
+                        // ASR スレッドの送信キューに入っている。次の発話境界も同じ
+                        // キューへ置けば、接続後に二つの声が一つの話者照合区間へ
+                        // 混ざらない。
+                        if !self.send_speech_start() {
+                            return;
+                        }
+                        self.server_audio_paused = false;
+                        self.pause_when_gate_stops = false;
+                        let preroll = self.preroll.take();
+                        if !preroll.is_empty() {
+                            self.queue_pending_audio(samples_to_bytes(&preroll));
                         }
                         self.refresh_overlay()
                     }
@@ -1749,7 +1766,10 @@ impl Controller {
     fn finish_current_speech(&mut self) {
         let client_can_finalize = matches!(self.settings.endpoint_mode.as_str(), "client" | "both");
         if client_can_finalize
-            && self.session.state() == SessionState::Streaming
+            && matches!(
+                self.session.state(),
+                SessionState::Connecting | SessionState::Streaming
+            )
             && !self.client_finalize_sent
         {
             if self.settings.endpoint_mode == "both" {
@@ -1760,6 +1780,17 @@ impl Controller {
                 self.server_audio_paused = true;
                 self.pause_when_gate_stops = false;
                 self.preroll.clear();
+            }
+            if self.session.state() == SessionState::Connecting {
+                // 接続待ち中に終わった短い発話も、音声と区切りを ASR スレッドの
+                // キューへ順番どおり渡す。Connected まで平坦な音声バッファへ
+                // 残すと、その間に始まった次の発話と結合されてしまう。
+                let pending_audio = std::mem::take(&mut self.pending_audio);
+                for bytes in pending_audio {
+                    if !self.send_audio_bytes(bytes) {
+                        return;
+                    }
+                }
             }
             self.client_finalize_sent = true;
             tracing::debug!(target: "otoa_input", "sending finalize");
@@ -1837,7 +1868,13 @@ impl Controller {
                 self.preroll.push(samples);
             }
             SessionState::Connecting => {
-                self.queue_pending_audio(samples_to_bytes(samples));
+                if self.client_finalize_sent {
+                    // 発話の区切りをキューへ送った後の無音は、その発話へ足さない。
+                    // 次の SpeechStarted のプリロールとしてだけ保持する。
+                    self.preroll.push(samples);
+                } else {
+                    self.queue_pending_audio(samples_to_bytes(samples));
+                }
             }
             SessionState::Streaming => {
                 if self.server_audio_paused {
@@ -2500,7 +2537,7 @@ impl Controller {
         if !idle_close_is_due(
             self.session.state(),
             self.gate.is_speaking(),
-            self.facts.pending_since.is_some(),
+            self.facts.pending_since.is_some() || self.finalize_pending,
             self.last_speech_endpoint_at,
             self.settings.idle_close_sec,
             Instant::now(),
@@ -4683,6 +4720,74 @@ mod tests {
     }
 
     #[test]
+    fn speech_that_ends_during_handshake_is_queued_as_one_complete_turn() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "both".to_string();
+        });
+        let mut controller = test_controller(settings);
+        let (to_asr, asr_commands) = crossbeam_channel::unbounded();
+        controller.asr = Some(AsrTransport::for_test(to_asr));
+        assert!(controller.session.apply(SessionInput::Enable));
+        assert!(controller.session.apply(SessionInput::SpeechStarted));
+        controller.pending_audio.push(vec![1, 2, 3, 4]);
+
+        controller.finish_current_speech();
+
+        assert!(matches!(
+            asr_commands.try_recv(),
+            Ok(AsrCommand::Audio(bytes)) if bytes == vec![1, 2, 3, 4]
+        ));
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+        assert!(controller.client_finalize_sent);
+        assert!(controller.finalize_pending);
+
+        controller.handle_asr_event(AsrEvent::Connected);
+        assert_eq!(controller.session.state(), SessionState::Streaming);
+        assert!(asr_commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn two_speeches_during_handshake_keep_their_server_turn_boundary() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "both".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let mut controller = test_controller(settings);
+        let (to_asr, asr_commands) = crossbeam_channel::unbounded();
+        controller.asr = Some(AsrTransport::for_test(to_asr));
+        assert!(controller.session.apply(SessionInput::Enable));
+        assert!(controller.session.apply(SessionInput::SpeechStarted));
+        controller.pending_audio.push(vec![1, 2]);
+        controller.finish_current_speech();
+        controller.handle_vad_samples(&[3]);
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+        controller.handle_vad_samples(&[4]);
+        controller.handle_asr_event(AsrEvent::Connected);
+
+        assert!(matches!(
+            asr_commands.try_recv(),
+            Ok(AsrCommand::Audio(bytes)) if bytes == vec![1, 2]
+        ));
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+        assert!(matches!(
+            asr_commands.try_recv(),
+            Ok(AsrCommand::SpeechStart)
+        ));
+        assert!(matches!(
+            asr_commands.try_recv(),
+            Ok(AsrCommand::Audio(bytes)) if bytes == 3_i16.to_le_bytes()
+        ));
+        assert!(matches!(
+            asr_commands.try_recv(),
+            Ok(AsrCommand::Audio(bytes)) if bytes == 4_i16.to_le_bytes()
+        ));
+        assert!(asr_commands.try_recv().is_err());
+    }
+
+    #[test]
     fn clip_warning_requires_more_than_point_one_percent() {
         assert_eq!(level_status(20_000, 2, 1_000), LevelStatus::Clipped);
         assert_eq!(level_status(20_000, 1, 1_000), LevelStatus::Normal);
@@ -5592,6 +5697,26 @@ mod tests {
             15,
             now
         ));
+    }
+
+    #[test]
+    fn periodic_does_not_idle_close_while_finalize_response_is_pending() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "both".to_string();
+            settings.idle_close_sec = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+        end_speech(&mut controller);
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+        controller.last_speech_endpoint_at = Some(Instant::now() - Duration::from_secs(1));
+
+        controller.periodic();
+
+        assert_eq!(controller.session.state(), SessionState::Streaming);
+        assert!(controller.finalize_pending);
+        assert!(asr_commands.try_recv().is_err());
     }
 
     #[test]
