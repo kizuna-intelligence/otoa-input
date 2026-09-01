@@ -2339,7 +2339,10 @@ impl Controller {
                     // ただし、既に次の発話を拾っている場合は古い `<end>` の可能性
                     // があるため止めず、その発話を欠かさない。
                     self.server_audio_paused = true;
-                    self.preroll.clear();
+                    // ここへ来る `<end>` は前の発話の遅れた応答かもしれない。
+                    // SpeechGate が次の短い発話を確認している途中では、見かけ上は
+                    // まだ idle でも preroll は既にその発話の先頭を持っている。
+                    // 音声送信を止めるだけにして、次発話用の有限バッファは残す。
                     tracing::debug!(target: "otoa_input", "paused server ASR audio after endpoint");
                 }
                 self.log_session_event("SpeechEndpoint");
@@ -5631,6 +5634,40 @@ mod tests {
                 assert_eq!(bytes, vec![101, 0, 54, 255]);
             }
             _ => panic!("next speech should resume audio with the saved preroll"),
+        }
+        assert!(asr_commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn late_endpoint_keeps_the_next_speech_preroll_before_start_confirmation() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "both".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        end_speech(&mut controller);
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+
+        // The first turn's result can arrive after the microphone has already
+        // started collecting the next turn, but before SpeechGate has emitted
+        // SpeechStarted. Those samples are the head of the next utterance.
+        controller.handle_vad_samples(&[101, -202]);
+        controller.handle_asr_event(AsrEvent::Endpoint);
+
+        assert_eq!(controller.gate.push(1.0), Some(GateEvent::SpeechStarted));
+        controller.handle_gate_event(GateEvent::SpeechStarted);
+
+        assert!(matches!(
+            asr_commands.try_recv(),
+            Ok(AsrCommand::SpeechStart)
+        ));
+        match asr_commands.try_recv() {
+            Ok(AsrCommand::Audio(bytes)) => {
+                assert_eq!(bytes, vec![101, 0, 54, 255]);
+            }
+            _ => panic!("late endpoint discarded the next utterance's head"),
         }
         assert!(asr_commands.try_recv().is_err());
     }
