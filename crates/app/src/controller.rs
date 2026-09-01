@@ -727,7 +727,7 @@ impl Controller {
         vad_events: Receiver<VadMessage>,
     ) -> anyhow::Result<Self> {
         let gate = gate_from_settings(&settings);
-        let preroll = PreRoll::new(milliseconds_to_samples(settings.preroll_ms));
+        let preroll = PreRoll::new(milliseconds_to_samples(effective_preroll_ms(&settings)));
         let splash_started_at = Instant::now();
         let mut text_out = TextOutput::new()?;
         configure_text_output(&mut text_out, &settings);
@@ -1558,10 +1558,20 @@ impl Controller {
             .into_iter()
             .filter_map(|prob| self.gate.push(prob))
             .collect::<Vec<_>>();
-        for event in events {
-            self.handle_gate_event(event);
+        // 開始はこのフレームを送れる状態にしてから、終了はこのフレームを
+        // 送り切ってから扱う。同じ順序で処理すると、どちらか一方の端が必ず
+        // 区切りの外へ出る。
+        for event in events.iter().copied() {
+            if event == GateEvent::SpeechStarted {
+                self.handle_gate_event(event);
+            }
         }
         self.handle_vad_samples(&samples);
+        for event in events {
+            if event == GateEvent::SpeechEnded {
+                self.handle_gate_event(event);
+            }
+        }
     }
 
     fn handle_gate_event(&mut self, event: GateEvent) {
@@ -3141,7 +3151,9 @@ impl Controller {
 
     fn rebuild_vad_configuration(&mut self) {
         self.gate = gate_from_settings(&self.settings);
-        self.preroll = PreRoll::new(milliseconds_to_samples(self.settings.preroll_ms));
+        self.preroll = PreRoll::new(milliseconds_to_samples(effective_preroll_ms(
+            &self.settings,
+        )));
     }
 
     fn apply_pending_settings(&mut self) {
@@ -3300,6 +3312,21 @@ fn gate_from_settings(settings: &Settings) -> SpeechGate {
     )
 }
 
+/// 発話開始の確認中に短い確率低下が挟まっても、最初の音を失わない保持時間。
+///
+/// 設定のプリロールだけでは、開始確認と無音確認をまたぐ発話頭を覆えない。
+/// 実機では開始しきい値 0.9、開始確認 200ms、無音確認 800ms に対して
+/// SpeechStarted が最初の有声判定から最大 981ms 遅れ、500ms の保持では
+/// 約 481ms が欠けた。二つの確認窓と VAD 1 フレームを最低限保持する。
+fn effective_preroll_ms(settings: &Settings) -> u32 {
+    settings.preroll_ms.max(
+        settings
+            .vad_min_speech_ms
+            .saturating_add(settings.vad_min_silence_ms)
+            .saturating_add(VAD_FRAME_MS),
+    )
+}
+
 fn short_login_error(error: &anyhow::Error) -> String {
     let message = error.to_string();
     let message = message.lines().next().unwrap_or("ログインに失敗しました");
@@ -3394,7 +3421,7 @@ mod tests {
         idle_close_is_due, is_loopback_host, is_nonfatal_asr_error, is_user_action_failure_message,
         level_status, next_enroll_retry_delay, next_failed_retry_delay, resolve_paste_shortcut,
         spawn_connection_control, AsrTransport, ConnectionControlEvent, Controller, DelayedTurn,
-        LevelStatus, OverlayKind, OverlayView, WarmupJob, WarmupReason, WarmupResult,
+        LevelStatus, OverlayKind, OverlayView, VadFrame, WarmupJob, WarmupReason, WarmupResult,
         ENROLL_RETRY_INITIAL, ENROLL_RETRY_MAX, FAILED_RETRY_INITIAL, FAILED_RETRY_MAX,
         GATEWAY_URL_MISSING_MESSAGE, OVERLAY_NOTICE_DURATION, PENDING_AUDIO_MAX_BYTES,
         SERVER_RESPONSE_STARTING_OVERLAY_DELAY, SERVER_RESPONSE_WAITING_OVERLAY_DELAY,
@@ -4687,6 +4714,25 @@ mod tests {
         assert_eq!(controller.pending_audio.len(), frames_for_20s);
     }
 
+    #[test]
+    fn preroll_covers_gate_confirmation_and_one_silence_gap() {
+        let settings = settings_with(|settings| {
+            settings.preroll_ms = 500;
+            settings.vad_min_speech_ms = 200;
+            settings.vad_min_silence_ms = 800;
+        });
+        let mut controller = test_controller(settings);
+        controller
+            .preroll
+            .push(&vec![1; super::milliseconds_to_samples(1_100)]);
+
+        assert_eq!(
+            controller.preroll.take().len(),
+            super::milliseconds_to_samples(1_032),
+            "開始判定中の短い確率低下をまたいだ発話頭まで残す"
+        );
+    }
+
     /// 上限を超えたら、古い方から捨てて新しい方を残す。
     #[test]
     fn pending_audio_keeps_the_newest_audio_and_records_the_drop() {
@@ -5784,6 +5830,29 @@ mod tests {
             Ok(AsrCommand::SpeechStart)
         ));
         assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Audio(_))));
+    }
+
+    #[test]
+    fn speech_ending_frame_is_sent_before_finalize() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "both".to_string();
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+
+        controller.handle_vad_frame(VadFrame {
+            probs: vec![0.0],
+            samples: vec![11, 22],
+        });
+
+        assert!(matches!(
+            asr_commands.try_recv(),
+            Ok(AsrCommand::Audio(bytes))
+                if bytes == [11_i16.to_le_bytes(), 22_i16.to_le_bytes()].concat()
+        ));
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+        assert!(asr_commands.try_recv().is_err());
     }
 
     #[test]
