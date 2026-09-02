@@ -254,6 +254,7 @@ fn apply_ui_update(state: UiState, update: UiUpdate, tray_updates: &Sender<tray:
             let _ = tray_updates.send(tray::TrayUpdate::Attention(tray_needs_attention(state)));
             tracing::trace!(?session_state, "session state update");
         }
+        UiUpdate::Settings(settings) => state.settings.set(settings),
         UiUpdate::Overlay(view) => {
             let overlay_attention = matches!(
                 view,

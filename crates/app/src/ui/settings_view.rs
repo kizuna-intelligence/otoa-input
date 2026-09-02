@@ -573,8 +573,8 @@ fn general_page(form: FormState, hidden: &[SettingsRow]) -> impl IntoView {
                 (
                     SettingsRow::StartListening,
                     setting_row(
-                        "起動時に待受を始める",
-                        caption("起動したらすぐ話せる状態にします"),
+                        "待受を有効にする",
+                        caption("現在の待受に反映し、次回起動時にも引き継ぎます"),
                         toggle_control(form.listening_enabled, form.reduce_motion),
                     )
                     .into_any(),
