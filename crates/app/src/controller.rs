@@ -878,16 +878,26 @@ impl Controller {
     }
 
     fn toggle_listening(&mut self) {
-        let enabled = !self.session.state().listening_enabled();
+        let settings = self.toggle_listening_preference();
+        let enabled = settings.listening_enabled;
+        if let Err(error) = crate::settings_io::save(&settings) {
+            tracing::warn!(%error, "待受の設定を保存できなかった");
+        }
+        self.send_ui(UiUpdate::Settings(settings));
+        self.apply_listening_setting(enabled);
+    }
+
+    /// 待受の希望を反転し、保存すべき設定全体を返す。
+    fn toggle_listening_preference(&mut self) -> Settings {
+        // 実行状態は接続準備やログイン待ちでも Disabled になり得る。
+        // 利用者が選んだ ON/OFF は保存設定を正本にして反転する。
+        let enabled = !self.settings.listening_enabled;
         self.settings.listening_enabled = enabled;
         if let Some(pending) = self.pending_settings.as_mut() {
             pending.listening_enabled = enabled;
+            return pending.clone();
         }
-        if let Err(error) = crate::settings_io::save(&self.settings) {
-            tracing::warn!(%error, "待受の設定を保存できなかった");
-        }
-        self.send_ui(UiUpdate::Settings(self.settings.clone()));
-        self.apply_listening_setting(enabled);
+        self.settings.clone()
     }
 
     fn start_login(&mut self) {
@@ -1494,6 +1504,7 @@ impl Controller {
                 // あって、いまの発話を続けたいわけではない。
                 self.settings = settings;
                 self.rebuild_vad_configuration();
+                let _ = self.session.apply(SessionInput::Aborted);
                 self.cleanup_asr();
                 let _ = self.start_warmup(WarmupReason::SettingsChanged);
                 if listening_state_changed {
@@ -2482,10 +2493,11 @@ impl Controller {
     }
 
     fn finish_asr_shutdown(&mut self) {
+        let transitioned = self.session.apply(SessionInput::Finished)
+            || self.session.apply(SessionInput::Aborted);
         self.cleanup_asr();
         let _ = self.transcript.take_segment();
-        if !self.session.apply(SessionInput::Finished) && !self.session.apply(SessionInput::Aborted)
-        {
+        if !transitioned {
             return;
         }
         self.clear_overlay_facts();
@@ -2498,9 +2510,10 @@ impl Controller {
     fn abort_asr_session(&mut self, error: AsrError) {
         tracing::warn!("ASR session ended normally: {error}");
         self.send_stop();
+        let transitioned = self.session.apply(SessionInput::Aborted);
         self.cleanup_asr();
         let _ = self.transcript.take_segment();
-        if !self.session.apply(SessionInput::Aborted) {
+        if !transitioned {
             return;
         }
         self.clear_overlay_facts();
@@ -2632,8 +2645,9 @@ impl Controller {
 
     fn reset_after_session_timeout(&mut self) {
         self.send_stop();
+        let transitioned = self.session.apply(SessionInput::Timeout);
         self.cleanup_asr();
-        if !self.session.apply(SessionInput::Timeout) {
+        if !transitioned {
             return;
         }
         self.clear_overlay_facts();
@@ -3231,13 +3245,9 @@ impl Controller {
         self.sent_frames = 0;
         self.last_audio_log_at = None;
         self.asr_closing = false;
-        // **接続を落としたら、状態も繋がっていない側へ戻す。**
-        //
-        // 落としたのに Streaming のまま残ると、次の音声は「繋がっている」
-        // 経路へ入り、もう無い送り先へ送って失敗する。接続先を変えたときに
-        // 実際に通る道である。Aborted は Connecting / Streaming / Closing
-        // からだけ効き、それ以外では何も起きない。
-        let _ = self.session.apply(SessionInput::Aborted);
+        // ここでは接続資源だけを片付ける。終了後の行き先まで決めると、呼び出し元が
+        // Finished / Timeout を適用する前に状態が進み、UI とマイク復帰を飛ばせる。
+        // 状態遷移は終了理由を知っている呼び出し元が、cleanup より先に行う。
     }
 }
 
@@ -3833,6 +3843,36 @@ mod tests {
     }
 
     #[test]
+    fn toggling_uses_the_saved_preference_when_runtime_is_disabled() {
+        let mut settings = Settings::default();
+        settings.listening_enabled = true;
+        let mut controller = test_controller(settings);
+        assert_eq!(controller.session.state(), SessionState::Disabled);
+
+        let settings_to_save = controller.toggle_listening_preference();
+
+        assert!(
+            !settings_to_save.listening_enabled,
+            "待受希望がONなら、実行状態が停止中でも次の操作はOFFであること"
+        );
+    }
+
+    #[test]
+    fn toggling_preserves_other_pending_settings_in_the_saved_value() {
+        let settings = settings_with(|settings| settings.vad_min_speech_ms = 0);
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+        let mut pending = controller.settings.clone();
+        pending.input_gain = 1.75;
+        controller.update_settings(pending);
+        assert!(controller.pending_settings.is_some());
+
+        let settings_to_save = controller.toggle_listening_preference();
+
+        assert_eq!(settings_to_save.input_gain, 1.75);
+        assert!(!settings_to_save.listening_enabled);
+    }
+
+    #[test]
     fn disabling_listening_while_streaming_stays_disabled_after_close() {
         let settings = settings_with(|settings| settings.vad_min_speech_ms = 0);
         let (mut controller, _asr_commands) = streaming_controller(settings);
@@ -3880,6 +3920,64 @@ mod tests {
 
         assert_eq!(controller.session.state(), SessionState::Closing);
         assert!(controller.settings.listening_enabled);
+    }
+
+    fn controller_reenabled_while_stopping() -> Controller {
+        let settings = settings_with(|settings| settings.vad_min_speech_ms = 0);
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+
+        let mut disabled = controller.settings.clone();
+        disabled.input_gain = 1.75;
+        disabled.listening_enabled = false;
+        controller.update_settings(disabled.clone());
+        assert_eq!(controller.session.state(), SessionState::Stopping);
+
+        disabled.listening_enabled = true;
+        controller.update_settings(disabled);
+        assert_eq!(controller.session.state(), SessionState::Closing);
+        assert!(controller.pending_settings.is_some());
+        controller
+    }
+
+    fn assert_reenabled_shutdown_completed(controller: &Controller) {
+        assert_eq!(controller.session.state(), SessionState::Listening);
+        assert!(
+            controller.pending_settings.is_none(),
+            "接続終了後に保留設定を適用すること"
+        );
+        assert_eq!(controller.settings.input_gain, 1.75);
+    }
+
+    #[test]
+    fn websocket_close_completes_a_reenabled_shutdown() {
+        let mut controller = controller_reenabled_while_stopping();
+
+        controller.handle_asr_event(AsrEvent::Closed {
+            code: None,
+            reason: String::new(),
+        });
+
+        assert_reenabled_shutdown_completed(&controller);
+    }
+
+    #[test]
+    fn nonfatal_failure_completes_a_reenabled_shutdown() {
+        let mut controller = controller_reenabled_while_stopping();
+
+        controller.handle_asr_event(AsrEvent::Failed(AsrError::Io(
+            "peer closed without close_notify".to_string(),
+        )));
+
+        assert_reenabled_shutdown_completed(&controller);
+    }
+
+    #[test]
+    fn disconnected_event_channel_completes_a_reenabled_shutdown() {
+        let mut controller = controller_reenabled_while_stopping();
+
+        controller.drain_asr_events();
+
+        assert_reenabled_shutdown_completed(&controller);
     }
 
     #[test]
