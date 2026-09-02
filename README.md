@@ -40,12 +40,14 @@
 | Windows | [`otoa-input-windows-x86_64.zip`](https://github.com/kizuna-intelligence/otoa-input/releases/latest/download/otoa-input-windows-x86_64.zip) |
 
 上の表のリンクは常に最新版を指します（名前に版番号を入れていないため）。
-今動いているものの版は `--version` で確かめられます。
+今動いているものの版は `--version` で確かめられます。Windows では
+`otoa-input-console.exe --version` を使います。
 
 - **Linux**: 実行できるようにします。`chmod +x otoa-input-*.AppImage`
 - **macOS**: `.dmg` を開いて `Otoa Input.app` を「アプリケーション」へドラッグ。
   署名と Apple の公証を通してあるので、そのまま開けます
-- **Windows**: `.zip` を展開して `otoa-input.exe`
+- **Windows**: `.zip` を展開して `otoa-input.exe`。GUI 本体なので、起動時に
+  黒いターミナルは表示されません
 
 ### 2. 認識モデルは自動で落ちてきます
 
@@ -165,6 +167,11 @@ Wayland の貼り付け動作はまだ実測していません。うまくいか
 ./otoa-input --preview-settings=general   # 設定画面を確認する
 ```
 
+Windows のコマンドプロンプトでは、`./otoa-input` を
+`otoa-input-console.exe` に読み替えます。`otoa-input.exe` は普段のGUI起動専用、
+`otoa-input-console.exe` は診断・オプション表示・サーバーモード用です。両者の
+音声入力処理と設定は同じものを使います。
+
 - **「認識モデルが見つかりません」** → 上の置き場所を確認してください。
   ReazonSpeech は `reazonspeech-k2-v2` の中に `tokens.txt`、kodama は
   `kodama-ja-streaming-small` の中に `tokenizer.json` がある状態です
@@ -198,8 +205,9 @@ bash scripts/package-macos.sh    # macOS: 署名・公証済み DMG（鍵は環�
 別の機械でサーバーだけ動かす場合:
 
 ```bash
-otoa-input --serve --asr-model-dir=<dir>   # 同じ実行ファイルでサーバーだけ
-otoa-asr-server --asr-model-dir=<dir>      # サーバー単体のバイナリ
+otoa-input --serve --asr-model-dir=<dir>   # Linux / macOS: 本体でサーバーだけ
+otoa-input-console.exe --serve --asr-model-dir=<dir> # Windows: コンソール版
+otoa-asr-server --asr-model-dir=<dir>      # 全OS: サーバー単体のバイナリ
 ```
 
 ## どれくらいの機械で動くか

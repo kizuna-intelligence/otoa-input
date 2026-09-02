@@ -68,7 +68,8 @@ NOTES="$(cat <<EOF
 - macOS (Apple Silicon): \`otoa-input-macos-arm64.dmg\`
 - Windows: \`otoa-input-windows-x86_64.zip\`
 
-手元のものがどの版かは \`--version\` で分かります。
+手元のものがどの版かは \`--version\` で分かります。Windows では
+\`otoa-input-console.exe --version\` を使います。
 
 Linux では貼り付けに \`xdotool\`（Wayland では \`wtype\`）が必要です。
 入っていないと、認識はできるのに貼り付けだけが失敗します。

@@ -137,6 +137,10 @@ UI の検証はホストで起動せず、`bash test-e2e/ui-preview.sh <state...
 
 - Windows のコンソールは日本語環境の既定が Shift-JIS なので、起動時に出力
   コードページを UTF-8 へ切り替えている
+- Windows の `otoa-input.exe` は GUI 実行形式にする。GUI とコンソールは PE の
+  Subsystem が実行ファイルごとに固定されるため、コマンド操作には同じ起動処理を
+  使う `otoa-input-console.exe` を配る。サーバー単体は従来どおり
+  `otoa-asr-server.exe` を使う
 
 ## macOS の配布
 
