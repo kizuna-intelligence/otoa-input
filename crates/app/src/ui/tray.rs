@@ -211,7 +211,7 @@ fn icon_for(session: SessionState, attention: bool) -> Result<Icon> {
     {
         let (bytes, size) = if attention {
             (ATTENTION_32_RGBA, 32)
-        } else if session == SessionState::Disabled {
+        } else if !session.listening_enabled() {
             (STOPPED_32_RGBA, 32)
         } else {
             (NORMAL_32_RGBA, 32)
@@ -223,7 +223,7 @@ fn icon_for(session: SessionState, attention: bool) -> Result<Icon> {
     {
         let (bytes, size) = if attention {
             (ATTENTION_22_RGBA, 22)
-        } else if session == SessionState::Disabled {
+        } else if !session.listening_enabled() {
             (STOPPED_22_RGBA, 22)
         } else {
             (NORMAL_22_RGBA, 22)
@@ -292,7 +292,7 @@ fn refresh_tray_visual(runtime: &TrayRuntime) {
 
 /// 待受の状態に応じたメニュー文言。
 pub fn toggle_label(state: SessionState) -> &'static str {
-    if state == SessionState::Disabled {
+    if !state.listening_enabled() {
         "待受を始める"
     } else {
         "待受を止める"
@@ -303,7 +303,7 @@ pub fn toggle_label(state: SessionState) -> &'static str {
 pub fn tooltip(state: SessionState) -> String {
     format!(
         "Otoa Input ・ {}",
-        if state == SessionState::Disabled {
+        if !state.listening_enabled() {
             "停止中"
         } else {
             "待受中"
@@ -389,6 +389,7 @@ mod tests {
     #[test]
     fn toggle_label_follows_session_state() {
         assert_eq!(toggle_label(SessionState::Disabled), "待受を始める");
+        assert_eq!(toggle_label(SessionState::Stopping), "待受を始める");
         assert_eq!(toggle_label(SessionState::Listening), "待受を止める");
         assert_eq!(toggle_label(SessionState::Failed), "待受を止める");
     }
@@ -396,6 +397,7 @@ mod tests {
     #[test]
     fn tooltip_follows_session_state() {
         assert_eq!(tooltip(SessionState::Disabled), "Otoa Input ・ 停止中");
+        assert_eq!(tooltip(SessionState::Stopping), "Otoa Input ・ 停止中");
         assert_eq!(tooltip(SessionState::Listening), "Otoa Input ・ 待受中");
     }
 }

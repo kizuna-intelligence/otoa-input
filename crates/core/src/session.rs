@@ -9,9 +9,27 @@ pub enum SessionState {
     /// ASR 接続先へ音声を送っている。
     Streaming,
     /// 停止要求済み。ASR セッションの完了通知（`finished`）待ち。
+    /// 完了後は待受へ戻る。
     Closing,
+    /// 利用者が待受を止め、ASR セッションの完了通知（`finished`）待ち。
+    /// 完了後は停止する。
+    Stopping,
     /// 失敗。ユーザー操作か再試行で戻る。
     Failed,
+}
+
+impl SessionState {
+    /// 利用者が待受を有効にしている状態か。
+    ///
+    /// `Stopping` は接続の終了待ちでも、希望状態は停止である。
+    pub fn listening_enabled(self) -> bool {
+        !matches!(self, Self::Disabled | Self::Stopping)
+    }
+
+    /// ASR 接続の終了を待っている状態か。
+    pub fn is_closing(self) -> bool {
+        matches!(self, Self::Closing | Self::Stopping)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,14 +53,12 @@ pub enum SessionInput {
 #[derive(Debug)]
 pub struct Session {
     state: SessionState,
-    disable_after_close: bool,
 }
 
 impl Session {
     pub fn new() -> Self {
         Self {
             state: SessionState::Disabled,
-            disable_after_close: false,
         }
     }
 
@@ -52,10 +68,6 @@ impl Session {
 
     /// 遷移する。許可されない入力は状態を変えず `false` を返す。
     pub fn apply(&mut self, input: SessionInput) -> bool {
-        if input == SessionInput::Enable {
-            self.disable_after_close = false;
-        }
-
         let next = match (self.state, input) {
             (SessionState::Disabled, SessionInput::Enable) => SessionState::Listening,
             (SessionState::Listening, SessionInput::SpeechStarted) => SessionState::Connecting,
@@ -63,37 +75,26 @@ impl Session {
             (SessionState::Listening, SessionInput::Disable) => SessionState::Disabled,
             (SessionState::Disabled, SessionInput::Failed) => SessionState::Failed,
             (SessionState::Connecting, SessionInput::Connected) => SessionState::Streaming,
-            (SessionState::Connecting, SessionInput::Disable) => SessionState::Closing,
+            (SessionState::Connecting, SessionInput::Disable) => SessionState::Stopping,
             (SessionState::Connecting, SessionInput::Failed) => SessionState::Failed,
             (SessionState::Streaming, SessionInput::IdleTimeout) => SessionState::Closing,
-            (SessionState::Streaming, SessionInput::Disable) => SessionState::Closing,
+            (SessionState::Streaming, SessionInput::Disable) => SessionState::Stopping,
             (SessionState::Streaming, SessionInput::Failed) => SessionState::Failed,
-            (SessionState::Closing, SessionInput::Disable) => {
-                self.disable_after_close = true;
-                SessionState::Closing
-            }
+            (SessionState::Closing, SessionInput::Disable) => SessionState::Stopping,
             (SessionState::Closing, SessionInput::Enable) => SessionState::Closing,
-            (SessionState::Closing, SessionInput::Finished) => {
-                let next = if self.disable_after_close {
-                    SessionState::Disabled
-                } else {
-                    SessionState::Listening
-                };
-                self.disable_after_close = false;
-                next
-            }
+            (SessionState::Stopping, SessionInput::Disable) => SessionState::Stopping,
+            (SessionState::Stopping, SessionInput::Enable) => SessionState::Closing,
+            (SessionState::Closing, SessionInput::Finished) => SessionState::Listening,
+            (SessionState::Stopping, SessionInput::Finished) => SessionState::Disabled,
             (SessionState::Closing, SessionInput::Failed) => SessionState::Failed,
+            (SessionState::Stopping, SessionInput::Failed) => SessionState::Disabled,
             (SessionState::Connecting, SessionInput::Timeout)
-            | (SessionState::Closing, SessionInput::Timeout) => {
-                self.disable_after_close = false;
-                SessionState::Listening
-            }
+            | (SessionState::Closing, SessionInput::Timeout) => SessionState::Listening,
+            (SessionState::Stopping, SessionInput::Timeout) => SessionState::Disabled,
             (SessionState::Connecting, SessionInput::Aborted)
             | (SessionState::Streaming, SessionInput::Aborted)
-            | (SessionState::Closing, SessionInput::Aborted) => {
-                self.disable_after_close = false;
-                SessionState::Listening
-            }
+            | (SessionState::Closing, SessionInput::Aborted) => SessionState::Listening,
+            (SessionState::Stopping, SessionInput::Aborted) => SessionState::Disabled,
             (SessionState::Failed, SessionInput::Retry) => SessionState::Listening,
             (SessionState::Failed, SessionInput::Disable) => SessionState::Disabled,
             _ => return false,
@@ -113,7 +114,7 @@ impl Session {
 
     /// この状態でマイクと VAD を回すか。
     pub fn is_listening(&self) -> bool {
-        self.state != SessionState::Disabled
+        self.state.listening_enabled()
     }
 }
 
@@ -127,12 +128,12 @@ impl Default for Session {
 mod tests {
     use super::{Session, SessionInput, SessionState};
 
-    fn session_in_closing() -> Session {
+    fn session_closing_after_idle() -> Session {
         let mut session = Session::new();
         assert!(session.apply(SessionInput::Enable));
         assert!(session.apply(SessionInput::SpeechStarted));
         assert!(session.apply(SessionInput::Connected));
-        assert!(session.apply(SessionInput::Disable));
+        assert!(session.apply(SessionInput::IdleTimeout));
         assert_eq!(session.state(), SessionState::Closing);
         session
     }
@@ -180,25 +181,32 @@ mod tests {
     }
 
     #[test]
-    fn disable_during_closing_ends_disabled() {
-        let mut session = session_in_closing();
+    fn disabling_a_streaming_session_ends_disabled() {
+        let mut session = Session::new();
+        assert!(session.apply(SessionInput::Enable));
+        assert!(session.apply(SessionInput::SpeechStarted));
+        assert!(session.apply(SessionInput::Connected));
         assert!(session.apply(SessionInput::Disable));
-        assert_eq!(session.state(), SessionState::Closing);
+        assert_eq!(session.state(), SessionState::Stopping);
         assert!(session.apply(SessionInput::Finished));
         assert_eq!(session.state(), SessionState::Disabled);
     }
 
     #[test]
-    fn closing_without_disable_returns_listening() {
-        let mut session = session_in_closing();
+    fn idle_close_returns_listening() {
+        let mut session = session_closing_after_idle();
         assert!(session.apply(SessionInput::Finished));
         assert_eq!(session.state(), SessionState::Listening);
     }
 
     #[test]
-    fn enable_clears_pending_disable() {
-        let mut session = session_in_closing();
+    fn enabling_while_stopping_returns_listening() {
+        let mut session = Session::new();
+        assert!(session.apply(SessionInput::Enable));
+        assert!(session.apply(SessionInput::SpeechStarted));
+        assert!(session.apply(SessionInput::Connected));
         assert!(session.apply(SessionInput::Disable));
+        assert_eq!(session.state(), SessionState::Stopping);
         assert!(session.apply(SessionInput::Enable));
         assert_eq!(session.state(), SessionState::Closing);
         assert!(session.apply(SessionInput::Finished));
@@ -207,7 +215,7 @@ mod tests {
 
     #[test]
     fn closing_timeout_returns_to_listening_and_accepts_new_speech() {
-        let mut session = session_in_closing();
+        let mut session = session_closing_after_idle();
         assert!(session.apply(SessionInput::Timeout));
         assert_eq!(session.state(), SessionState::Listening);
         assert!(session.apply(SessionInput::SpeechStarted));
@@ -228,11 +236,29 @@ mod tests {
                 assert!(session.apply(SessionInput::Connected));
             }
             if state == SessionState::Closing {
-                assert!(session.apply(SessionInput::Disable));
+                assert!(session.apply(SessionInput::IdleTimeout));
             }
 
             assert!(session.apply(SessionInput::Aborted));
             assert_eq!(session.state(), SessionState::Listening);
+        }
+    }
+
+    #[test]
+    fn stopping_completion_failures_stay_disabled() {
+        for end in [
+            SessionInput::Timeout,
+            SessionInput::Aborted,
+            SessionInput::Failed,
+        ] {
+            let mut session = Session::new();
+            assert!(session.apply(SessionInput::Enable));
+            assert!(session.apply(SessionInput::SpeechStarted));
+            assert!(session.apply(SessionInput::Connected));
+            assert!(session.apply(SessionInput::Disable));
+            assert_eq!(session.state(), SessionState::Stopping);
+            assert!(session.apply(end));
+            assert_eq!(session.state(), SessionState::Disabled);
         }
     }
 }

@@ -532,7 +532,9 @@ fn status_line(state: UiState, hovered: RwSignal<bool>) -> impl IntoView {
         }),
         label(move || {
             let mode = state.overlay_mode.get();
-            if hovered.get()
+            if hovered.get() && !state.session_state.get().listening_enabled() {
+                "クリックで待受を始める".to_string()
+            } else if hovered.get()
                 && matches!(
                     mode,
                     OverlayMode::Shown(

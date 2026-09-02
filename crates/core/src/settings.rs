@@ -66,7 +66,7 @@ pub struct Settings {
     pub asr_engine: String,
     /// 言語ヒント。空なら自動検出。
     pub language_hints: Vec<String>,
-    /// 起動時に待受を始めるか。
+    /// 待受を有効にするか。保存時に現在の待受へ反映し、次回起動時にも使う。
     pub listening_enabled: bool,
     /// 空なら同梱モデルを探す。
     pub vad_model_path: String,

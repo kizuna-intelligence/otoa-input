@@ -309,9 +309,10 @@ pub enum OverlayKind {
     LoginNeeded,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum UiUpdate {
     State(SessionState),
+    Settings(Settings),
     Overlay(OverlayView),
     Level { peak: i16, status: LevelStatus },
     Account { email: Option<String> },
@@ -877,17 +878,16 @@ impl Controller {
     }
 
     fn toggle_listening(&mut self) {
-        if self.session.state() == SessionState::Disabled {
-            {
-                if self.login_required() {
-                    self.start_login();
-                } else {
-                    self.enable_listening();
-                }
-            }
-        } else {
-            self.disable_listening();
+        let enabled = !self.session.state().listening_enabled();
+        self.settings.listening_enabled = enabled;
+        if let Some(pending) = self.pending_settings.as_mut() {
+            pending.listening_enabled = enabled;
         }
+        if let Err(error) = crate::settings_io::save(&self.settings) {
+            tracing::warn!(%error, "待受の設定を保存できなかった");
+        }
+        self.send_ui(UiUpdate::Settings(self.settings.clone()));
+        self.apply_listening_setting(enabled);
     }
 
     fn start_login(&mut self) {
@@ -1326,6 +1326,12 @@ impl Controller {
         if !self.session.apply(SessionInput::Enable) {
             return;
         }
+        // 停止処理中の再開要求は、接続が閉じ終わるまでマイクを戻さない。
+        // Closing は「閉じたら待受へ戻る」を表すので、完了通知だけを待つ。
+        if self.session.state() == SessionState::Closing {
+            self.send_ui(UiUpdate::State(SessionState::Closing));
+            return;
+        }
         self.failed_at = None;
         self.failed_recovery_enabled = false;
         self.failed_retry_delay = FAILED_RETRY_INITIAL;
@@ -1364,7 +1370,7 @@ impl Controller {
             SessionState::Connecting | SessionState::Streaming => {
                 if self.session.apply(SessionInput::Disable) {
                     self.closing_started_at = Some(Instant::now());
-                    self.send_ui(UiUpdate::State(SessionState::Closing));
+                    self.send_ui(UiUpdate::State(SessionState::Stopping));
                     self.send_finalize();
                     self.send_stop();
                 }
@@ -1377,8 +1383,11 @@ impl Controller {
                 }
             }
             SessionState::Closing => {
-                self.session.apply(SessionInput::Disable);
+                if self.session.apply(SessionInput::Disable) {
+                    self.send_ui(UiUpdate::State(SessionState::Stopping));
+                }
             }
+            SessionState::Stopping => {}
             SessionState::Disabled => {}
         }
         self.clear_overlay_facts();
@@ -1436,6 +1445,9 @@ impl Controller {
 
     fn update_settings(&mut self, settings: Settings) {
         let microphone_changed = self.settings.microphone != settings.microphone;
+        let listening_enabled = settings.listening_enabled;
+        let listening_state_changed =
+            self.session.state().listening_enabled() != listening_enabled;
         // 接続先が変わったなら、その場で暖める。**保存した直後だけ遅い**のを避ける。
         let route_changed = self.route_differs(&settings);
         configure_text_output(&mut self.text_out, &settings);
@@ -1445,11 +1457,8 @@ impl Controller {
         self.send_route_update_for(&settings);
         if matches!(
             self.session.state(),
-            SessionState::Disabled | SessionState::Failed
+            SessionState::Disabled | SessionState::Listening | SessionState::Failed
         ) {
-            let should_enable = self.session.state() == SessionState::Disabled
-                && !self.settings.listening_enabled
-                && settings.listening_enabled;
             self.settings = settings;
             self.rebuild_vad_configuration();
             if route_changed {
@@ -1462,8 +1471,8 @@ impl Controller {
                 // 切り替える前の接続先になる。
                 let _ = self.start_warmup(WarmupReason::SettingsChanged);
             }
-            if should_enable {
-                self.enable_listening();
+            if listening_state_changed {
+                self.apply_listening_setting(listening_enabled);
             }
         } else {
             if microphone_changed && self.audio_capture.take().is_some() {
@@ -1487,10 +1496,31 @@ impl Controller {
                 self.rebuild_vad_configuration();
                 self.cleanup_asr();
                 let _ = self.start_warmup(WarmupReason::SettingsChanged);
+                if listening_state_changed {
+                    self.apply_listening_setting(listening_enabled);
+                }
                 self.refresh_overlay();
                 return;
             }
+            // 待受の希望だけは保留しない。ほかの設定を発話後まで保留しても、
+            // OFF が効かない／停止中の ON が効かない状態を作らない。
+            self.settings.listening_enabled = listening_enabled;
             self.pending_settings = Some(settings);
+            if listening_state_changed {
+                self.apply_listening_setting(listening_enabled);
+            }
+        }
+    }
+
+    fn apply_listening_setting(&mut self, enabled: bool) {
+        if enabled {
+            if self.login_required() {
+                self.start_login();
+            } else {
+                self.enable_listening();
+            }
+        } else {
+            self.disable_listening();
         }
     }
 
@@ -1883,7 +1913,7 @@ impl Controller {
                 self.preroll.push(samples);
             }
             // マイクを止めている間だけ捨てる。
-            SessionState::Disabled => {}
+            SessionState::Stopping | SessionState::Disabled => {}
         }
     }
 
@@ -2177,7 +2207,7 @@ impl Controller {
                 Some(Ok(event)) => self.handle_asr_event(event),
                 Some(Err(TryRecvError::Empty)) => break,
                 Some(Err(TryRecvError::Disconnected)) => {
-                    if self.asr_closing || self.session.state() == SessionState::Closing {
+                    if self.asr_closing || self.session.state().is_closing() {
                         tracing::debug!("ASR event channel closed during normal shutdown");
                         self.finish_asr_shutdown();
                     } else {
@@ -2402,7 +2432,7 @@ impl Controller {
                     };
                     tracing::warn!(?code, "ASR connection rejected by server");
                     self.fail_runtime(message);
-                } else if self.asr_closing || self.session.state() == SessionState::Closing {
+                } else if self.asr_closing || self.session.state().is_closing() {
                     tracing::debug!(?code, "ASR connection closed during normal shutdown");
                     self.finish_asr_shutdown();
                 } else if !reason.is_empty() {
@@ -2436,7 +2466,7 @@ impl Controller {
             AsrEvent::Failed(error) => {
                 self.complete_pending_wait("ASR error received");
                 if is_nonfatal_asr_error(&error) {
-                    if self.asr_closing || self.session.state() == SessionState::Closing {
+                    if self.asr_closing || self.session.state().is_closing() {
                         tracing::debug!("ASR connection closed during normal shutdown: {error}");
                         self.finish_asr_shutdown();
                     } else {
@@ -2550,7 +2580,7 @@ impl Controller {
     fn check_session_timeouts(&mut self) {
         let now = Instant::now();
         match self.session.state() {
-            SessionState::Closing
+            SessionState::Closing | SessionState::Stopping
                 if self
                     .closing_started_at
                     .is_some_and(|started| now.duration_since(started) >= CLOSING_TIMEOUT) =>
@@ -2607,14 +2637,8 @@ impl Controller {
             return;
         }
         self.clear_overlay_facts();
-        self.send_ui(UiUpdate::State(SessionState::Listening));
-        self.reset_vad_state();
-        if self.audio_capture.is_none() {
-            if let Err(error) = self.start_audio_capture() {
-                self.suspend_vad();
-                self.fail_runtime_user_action(format!("failed to resume microphone: {error:#}"));
-            }
-        }
+        self.send_ui(UiUpdate::State(self.session.state()));
+        self.resume_after_finished();
         self.apply_pending_settings();
         self.refresh_overlay();
     }
@@ -2653,7 +2677,7 @@ impl Controller {
 
         if self.settings.auto_paste
             && !self.settings.paste_per_endpoint
-            && self.session.state() != SessionState::Closing
+            && !self.session.state().is_closing()
         {
             return;
         }
@@ -2706,13 +2730,18 @@ impl Controller {
     fn fail_runtime_with_policy(&mut self, message: String, auto_recover: bool) {
         let message = self.sanitize_message(message);
         tracing::error!("{message}");
-        let entered_failed = self.session.apply(SessionInput::Failed);
-        if entered_failed || self.session.state() == SessionState::Failed {
-            if entered_failed {
+        let transitioned = self.session.apply(SessionInput::Failed);
+        if self.session.state() == SessionState::Failed {
+            if transitioned {
                 self.failed_at = Some(Instant::now());
             }
             self.failed_recovery_enabled = auto_recover;
             self.send_ui(UiUpdate::State(SessionState::Failed));
+        } else if transitioned {
+            // 利用者が停止を選んだ後の失敗は、待受へ自動復帰させない。
+            self.failed_at = None;
+            self.failed_recovery_enabled = false;
+            self.send_ui(UiUpdate::State(self.session.state()));
         }
         if auto_recover {
             self.show_overlay_error(message);
@@ -2819,7 +2848,7 @@ impl Controller {
         // 経路だけは、対応する接続が無いのでここで片づける。
         if !matches!(
             self.session.state(),
-            SessionState::Streaming | SessionState::Closing
+            SessionState::Streaming | SessionState::Closing | SessionState::Stopping
         ) {
             self.delayed_turn = None;
         }
@@ -3149,7 +3178,7 @@ impl Controller {
 
     fn request_shutdown(&mut self) {
         self.cancel_warmup();
-        let was_closing = self.session.state() == SessionState::Closing;
+        let was_closing = self.session.state().is_closing();
         self.disable_listening();
         if was_closing {
             self.send_stop();
@@ -3769,6 +3798,88 @@ mod tests {
             connection_exited.load(Ordering::SeqCst),
             "古い接続の終了待ちで設定変更が停止している"
         );
+    }
+
+    #[test]
+    fn disabling_listening_in_settings_takes_effect_while_idle() {
+        let mut controller = test_controller(Settings::default());
+        assert!(controller.session.apply(SessionInput::Enable));
+        assert_eq!(controller.session.state(), SessionState::Listening);
+
+        let mut next = controller.settings.clone();
+        next.listening_enabled = false;
+        controller.update_settings(next);
+
+        assert_eq!(controller.session.state(), SessionState::Disabled);
+        assert!(!controller.settings.listening_enabled);
+        assert!(
+            controller.pending_settings.is_none(),
+            "待受の切替を終わらないセッションへ保留しない"
+        );
+    }
+
+    #[test]
+    fn settings_reconcile_an_already_inconsistent_listening_state() {
+        let mut settings = Settings::default();
+        settings.listening_enabled = false;
+        let mut controller = test_controller(settings.clone());
+        assert!(controller.session.apply(SessionInput::Enable));
+        assert_eq!(controller.session.state(), SessionState::Listening);
+
+        controller.update_settings(settings);
+
+        assert_eq!(controller.session.state(), SessionState::Disabled);
+        assert!(!controller.settings.listening_enabled);
+    }
+
+    #[test]
+    fn disabling_listening_while_streaming_stays_disabled_after_close() {
+        let settings = settings_with(|settings| settings.vad_min_speech_ms = 0);
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+
+        let mut next = controller.settings.clone();
+        next.listening_enabled = false;
+        controller.update_settings(next);
+
+        assert_eq!(controller.session.state(), SessionState::Stopping);
+        controller.handle_asr_event(AsrEvent::Finished);
+        assert_eq!(controller.session.state(), SessionState::Disabled);
+        assert!(!controller.settings.listening_enabled);
+        assert!(controller.pending_settings.is_none());
+    }
+
+    #[test]
+    fn stopping_timeout_does_not_restart_the_microphone() {
+        let settings = settings_with(|settings| settings.vad_min_speech_ms = 0);
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+
+        let mut next = controller.settings.clone();
+        next.listening_enabled = false;
+        controller.update_settings(next);
+        assert_eq!(controller.session.state(), SessionState::Stopping);
+
+        controller.reset_after_session_timeout();
+
+        assert_eq!(controller.session.state(), SessionState::Disabled);
+        assert!(controller.audio_capture.is_none());
+    }
+
+    #[test]
+    fn enabling_listening_again_while_stopping_changes_the_close_destination() {
+        let settings = settings_with(|settings| settings.vad_min_speech_ms = 0);
+        let (mut controller, _asr_commands) = streaming_controller(settings);
+
+        let mut disabled = controller.settings.clone();
+        disabled.listening_enabled = false;
+        controller.update_settings(disabled);
+        assert_eq!(controller.session.state(), SessionState::Stopping);
+
+        let mut enabled = controller.settings.clone();
+        enabled.listening_enabled = true;
+        controller.update_settings(enabled);
+
+        assert_eq!(controller.session.state(), SessionState::Closing);
+        assert!(controller.settings.listening_enabled);
     }
 
     #[test]

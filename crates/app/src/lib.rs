@@ -74,7 +74,7 @@ pub use wiring::SettingsPage;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[non_exhaustive]
 pub enum SettingsRow {
-    /// 一般 — 起動時に待受を始める
+    /// 一般 — 待受を有効にする
     StartListening,
     /// 一般 — 確定後に自動で貼り付ける
     AutoPaste,
