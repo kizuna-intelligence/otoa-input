@@ -2524,7 +2524,7 @@ impl Controller {
         self.check_server_response_wait_overlay();
         if !idle_close_is_due(
             self.session.state(),
-            self.gate.is_speaking(),
+            self.gate.is_speaking() && !self.server_audio_paused,
             self.facts.pending_since.is_some() || self.finalize_pending,
             self.last_speech_endpoint_at,
             self.settings.idle_close_sec,
@@ -5716,6 +5716,30 @@ mod tests {
             15,
             now
         ));
+    }
+
+    #[test]
+    fn paused_endpoint_closes_on_time_even_if_the_gate_stays_speaking() {
+        let settings = settings_with(|settings| {
+            settings.endpoint_mode = "server".to_string();
+            settings.idle_close_sec = 0;
+            settings.vad_min_speech_ms = 0;
+            settings.vad_min_silence_ms = 0;
+        });
+        let (mut controller, asr_commands) = streaming_controller(settings);
+        assert!(controller.gate.is_speaking());
+
+        controller.handle_asr_event(AsrEvent::Endpoint);
+        assert!(controller.server_audio_paused);
+        controller.last_speech_endpoint_at = Some(Instant::now() - Duration::from_secs(1));
+        while asr_commands.try_recv().is_ok() {}
+
+        controller.periodic();
+
+        assert_eq!(controller.session.state(), SessionState::Closing);
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Finalize)));
+        assert!(matches!(asr_commands.try_recv(), Ok(AsrCommand::Stop)));
+        assert!(asr_commands.try_recv().is_err());
     }
 
     #[test]
