@@ -172,7 +172,9 @@ impl Default for Settings {
             // 300 ms では 26 候補中 3 件が 2 分割された。
             vad_min_silence_ms: 400,
             preroll_ms: 500,
-            idle_close_sec: 15,
+            // 発話間で接続を再利用し、短い間隔の入力ごとに推論サービスを
+            // 再起動させない。サーバー側の未応答中は別途、時間に関係なく保持する。
+            idle_close_sec: 120,
             microphone: String::new(),
             auto_paste: true,
             paste_per_endpoint: true,
@@ -232,7 +234,7 @@ mod tests {
         assert_eq!(settings.input_gain, 1.0);
         assert_eq!(settings.vad_min_speech_ms, 200);
         assert_eq!(settings.preroll_ms, 500);
-        assert_eq!(settings.idle_close_sec, 15);
+        assert_eq!(settings.idle_close_sec, 120);
         assert!(settings.auto_paste);
         assert!(settings.paste_per_endpoint);
         assert_eq!(settings.paste_shortcut, PasteShortcutSetting::Auto);

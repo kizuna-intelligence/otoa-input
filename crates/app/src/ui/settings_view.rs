@@ -606,7 +606,7 @@ fn general_page(form: FormState, hidden: &[SettingsRow]) -> impl IntoView {
                     setting_row(
                         "発話が無いときに接続を閉じるまで",
                         caption(""),
-                        numeric_field::<u32>(form.idle_close_sec, "15", "秒"),
+                        numeric_field::<u32>(form.idle_close_sec, "120", "秒"),
                     )
                     .into_any(),
                 ),
