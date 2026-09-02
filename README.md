@@ -12,7 +12,7 @@
 |---|---|
 | **CPU 1 コアで動く** | 7.68 秒の発話を **0.32 秒**で認識（実時間比 0.042） |
 | **待ち受け中はほぼ無負荷** | CPU **2%** / メモリ **44 MB** |
-| **1 つ起動するだけ** | 実行ファイルは 1 つ。ASR サーバーは必要なときに自分で立ち上がる |
+| **1 つ起動するだけ** | 通常は本体を 1 つ起動するだけ。ASR サーバーは必要なときに自分で立ち上がる |
 | **外部サービス不要** | クライアントと ASR サーバーの両方が入っている。音声は外へ出ない |
 
 **コア数を増やしても速くなりません。1 コアで足ります。**
@@ -40,12 +40,14 @@
 | Windows | [`otoa-input-windows-x86_64.zip`](https://github.com/kizuna-intelligence/otoa-input/releases/latest/download/otoa-input-windows-x86_64.zip) |
 
 上の表のリンクは常に最新版を指します（名前に版番号を入れていないため）。
-今動いているものの版は `--version` で確かめられます。
+今動いているものの版は `--version` で確かめられます。Windows では
+`otoa-input-console.exe --version` を使います。
 
 - **Linux**: 実行できるようにします。`chmod +x otoa-input-*.AppImage`
 - **macOS**: `.dmg` を開いて `Otoa Input.app` を「アプリケーション」へドラッグ。
   署名と Apple の公証を通してあるので、そのまま開けます
-- **Windows**: `.zip` を展開して `otoa-input.exe`
+- **Windows**: `.zip` を展開して `otoa-input.exe`。GUI 本体なので、起動時に
+  黒いターミナルは表示されません
 
 ### 2. 認識モデルは自動で落ちてきます
 
@@ -165,6 +167,11 @@ Wayland の貼り付け動作はまだ実測していません。うまくいか
 ./otoa-input --preview-settings=general   # 設定画面を確認する
 ```
 
+Windows のコマンドプロンプトでは、`./otoa-input` を
+`otoa-input-console.exe` に読み替えます。`otoa-input.exe` は普段のGUI起動専用、
+`otoa-input-console.exe` は診断・オプション表示・サーバーモード用です。両者の
+音声入力処理と設定は同じものを使います。
+
 - **「認識モデルが見つかりません」** → 上の置き場所を確認してください。
   ReazonSpeech は `reazonspeech-k2-v2` の中に `tokens.txt`、kodama は
   `kodama-ja-streaming-small` の中に `tokenizer.json` がある状態です
@@ -198,8 +205,9 @@ bash scripts/package-macos.sh    # macOS: 署名・公証済み DMG（鍵は環�
 別の機械でサーバーだけ動かす場合:
 
 ```bash
-otoa-input --serve --asr-model-dir=<dir>   # 同じ実行ファイルでサーバーだけ
-otoa-asr-server --asr-model-dir=<dir>      # サーバー単体のバイナリ
+otoa-input --serve --asr-model-dir=<dir>   # Linux / macOS: 本体でサーバーだけ
+otoa-input-console.exe --serve --asr-model-dir=<dir> # Windows: コンソール版
+otoa-asr-server --asr-model-dir=<dir>      # 全OS: サーバー単体のバイナリ
 ```
 
 ## どれくらいの機械で動くか
@@ -229,9 +237,10 @@ Intel Core Ultra 7 265K の **1 コアに CPU 帯域の制限をかけて実測*
 体感の目安は「話し終えてから 1 秒以内に貼り付く」あたり。上の表では
 1 コアの 25% 程度が境目になる。
 
-配布物は AppImage 23 MB / DMG 28 MB / zip 24 MB。**実行ファイルは 1 つ**で、
-共有ライブラリも追加ファイルも要らない（ONNX Runtime は静的リンク、
-VAD モデルはバイナリへ埋め込み）。別途要るのは認識モデルだけ。
+通常起動する本体は 1 つで、共有ライブラリも追加ファイルも要らない
+（ONNX Runtime は静的リンク、VAD モデルはバイナリへ埋め込み）。Windows の
+zip には、GUI 本体に加えて診断・オプション表示用とサーバー単体用の実行ファイルも
+入っている。別途要るのは認識モデルだけ。
 
 ## 中身を読む人へ
 

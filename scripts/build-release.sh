@@ -4,12 +4,13 @@
 # 利用者にビルドさせないためのものなので、**実行に必要なものを全部入れる。**
 # 入れ忘れると、起動はするのに貼り付けだけ動かない、といった形で表に出る。
 #
-#   otoa-input          本体。これ 1 つで動く。必要なら ASR サーバーも
-#                       自分で立ち上げる（--serve でサーバーだけにもできる）
+#   otoa-input          GUI 本体。これ 1 つで音声入力できる
+#   otoa-input-console  Windows のコマンド操作用。GUI 本体と同じ処理を使う
 #   otoa-asr-server     ASR サーバー単体。別の機械でサーバーだけ動かす用
 #
 # ONNX Runtime は静的リンク、Silero VAD モデルはバイナリへ埋め込んであるので、
-# 共有ライブラリも resources/ も要らない。**バイナリ 2 つだけで動く。**
+# 共有ライブラリも resources/ も要らない。Linux / macOS はバイナリ 2 つ、
+# Windows は GUI とコマンド操作の入口を分けた 3 つだけで動く。
 #
 # 認識モデル(ReazonSpeech k2-v2)は同梱しない。数百 MB あり、README の手順で
 # 各自が取得する。
@@ -50,7 +51,10 @@ echo "==> 収集 -> $STAGE"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-for binary in otoa-input otoa-asr-server; do
+BINARIES="otoa-input otoa-asr-server"
+[ "$OS" = windows ] && BINARIES="$BINARIES otoa-input-console"
+
+for binary in $BINARIES; do
     src="target/release/$binary"
     [ "$OS" = windows ] && src="$src.exe"
     [ -f "$src" ] || { echo "実行ファイルが無い: $src" >&2; exit 1; }
@@ -68,13 +72,18 @@ cp README.md LICENSE NOTICE THIRD-PARTY-LICENSES.md "$STAGE/"
 case "$OS" in
     windows)
         LAUNCH='otoa-input.exe'
+        CLI='otoa-input-console.exe'
         CONT='^'
         PLATFORM_NOTE='署名していないため、初回起動時に Windows の SmartScreen が
 「WindowsによってPCが保護されました」と警告します。
-［詳細情報］→［実行］で起動できます。'
+［詳細情報］→［実行］で起動できます。
+
+コマンドプロンプトで診断やオプション表示を行う場合は、黒い画面を持たない
+本体ではなく otoa-input-console.exe を使います。'
         ;;
     macos)
         LAUNCH='./otoa-input'
+        CLI='./otoa-input'
         CONT='\'
         PLATFORM_NOTE='システム設定 →「プライバシーとセキュリティ」→「アクセシビリティ」と
 「マイク」で otoa-input を許可してください。許可しないと、認識はできるのに
@@ -82,6 +91,7 @@ case "$OS" in
         ;;
     *)
         LAUNCH='./otoa-input'
+        CLI='./otoa-input'
         CONT='\'
         PLATFORM_NOTE='貼り付けに xdotool（Wayland では wtype）が要ります。
 入っていないと、認識はできるのに貼り付けだけが失敗します。'
@@ -105,7 +115,7 @@ Otoa Input $VERSION ($OS/$ARCH)
 
    ASR サーバーは必要なときに自分で立ち上がります。別で起動する必要は
    ありません。別の機械でサーバーだけ動かしたい場合は otoa-asr-server
-   （または otoa-input --serve）を使ってください。
+   （または $CLI --serve）を使ってください。
 
 $PLATFORM_NOTE
 
@@ -127,8 +137,8 @@ $PLATFORM_NOTE
    models/kodama-ja-streaming-small/ に置き、設定画面の「認識エンジン」で
    kodama を選びます。.onnx.data を忘れると読み込みに失敗します。
 
-この配布物の版: ${VERSION}（$LAUNCH --version でも確かめられます）
-詳細は README.md、オプションは --help を見てください。
+この配布物の版: ${VERSION}（$CLI --version でも確かめられます）
+詳細は README.md、オプションは $CLI --help を見てください。
 EOF
 
 echo "==> 検査"
@@ -141,7 +151,7 @@ case "$OS" in
     macos) list_links() { otool -L "$1" 2>/dev/null; } ;;
     *)     list_links() { :; } ;;   # Windows は同梱 DLL を持たない前提
 esac
-for binary in otoa-input otoa-asr-server; do
+for binary in $BINARIES; do
     target="$STAGE/$binary"
     [ "$OS" = windows ] && target="$target.exe"
     if list_links "$target" | grep -qiE "onnx|sherpa"; then
@@ -152,8 +162,13 @@ for binary in otoa-input otoa-asr-server; do
 done
 echo "    ONNX への動的リンクなし"
 
+if [ "$OS" = windows ]; then
+    bash scripts/check-windows-subsystems.sh "$STAGE"
+    echo "    Windows の GUI / コンソール実行形式を確認"
+fi
+
 "$STAGE/otoa-asr-server" --help > /dev/null
-"$STAGE/otoa-input" --help > /dev/null
+"$STAGE/$CLI" --help > /dev/null
 echo "    --help が両方とも動いた"
 
 echo "==> 圧縮"

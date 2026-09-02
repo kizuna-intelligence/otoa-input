@@ -257,6 +257,26 @@ otoa-input — 話した内容をカーソル位置へ貼り付ける音声入�
 アドレス (ws://127.0.0.1:8770/asr/v1) へ繋ぐ。
 ";
 
+fn usage(command_name: &str) -> String {
+    USAGE
+        .replace(
+            "otoa-input — 話した内容をカーソル位置へ貼り付ける音声入力",
+            &format!("{command_name} — 話した内容をカーソル位置へ貼り付ける音声入力"),
+        )
+        .replace(
+            "  otoa-input [オプション]",
+            &format!("  {command_name} [オプション]"),
+        )
+        .replace(
+            "  otoa-input --serve [サーバーオプション]",
+            &format!("  {command_name} --serve [サーバーオプション]"),
+        )
+        .replace(
+            "詳細は otoa-input --serve --help",
+            &format!("詳細は {command_name} --serve --help"),
+        )
+}
+
 fn server_arguments(arguments: &[String]) -> Option<Vec<String>> {
     arguments
         .iter()
@@ -270,11 +290,11 @@ fn server_arguments(arguments: &[String]) -> Option<Vec<String>> {
         })
 }
 
-fn run_server(arguments: &[String]) -> anyhow::Result<()> {
+fn run_server(arguments: &[String], command_name: &str) -> anyhow::Result<()> {
     if otoa_asr_server::Config::help_requested(arguments) {
         print!(
             "{}",
-            otoa_asr_server::USAGE.replace("otoa-asr-server", "otoa-input --serve")
+            otoa_asr_server::USAGE.replace("otoa-asr-server", &format!("{command_name} --serve"))
         );
         return Ok(());
     }
@@ -324,11 +344,16 @@ fn paste_test(text: &str) -> i32 {
 pub fn run(deps: Deps) -> anyhow::Result<()> {
     otoa_input_platform::console::use_utf8_output();
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let command_name = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_stem().map(|name| name.to_owned()))
+        .and_then(|name| name.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "otoa-input".to_string());
     // サーバーモードは設定ファイル、多重起動ロック、音声デバイスの初期化より
     // 前に分岐する。`--serve` 自体はサーバーの設定オプションではないので、
     // Config へ渡す前に取り除く。
     if let Some(arguments) = server_arguments(&arguments) {
-        return run_server(&arguments);
+        return run_server(&arguments, &command_name);
     }
     // 使い方の表示は、多重起動の判定より先に行う。あとに置くと、
     // 起動中の `--help` が「already running」で終わる。
@@ -336,7 +361,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         .iter()
         .any(|argument| argument == "--help" || argument == "-h")
     {
-        print!("{USAGE}");
+        print!("{}", usage(&command_name));
         return Ok(());
     }
     // 配布物の名前に版を入れていないので、**手元のものがどれかはここで見る。**
@@ -345,7 +370,7 @@ pub fn run(deps: Deps) -> anyhow::Result<()> {
         .iter()
         .any(|argument| argument == "--version" || argument == "-V")
     {
-        println!("otoa-input {}", env!("CARGO_PKG_VERSION"));
+        println!("{command_name} {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 

@@ -3,6 +3,7 @@ name = "otoa-input-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "otoa-input"
 
 [lib]
 name = "otoa_input_app"
@@ -11,6 +12,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "otoa-input"
 path = "src/main.rs"
+
+[[bin]]
+name = "otoa-input-console"
+path = "src/console_main.rs"
 
 [dependencies]
 otoa-asr-server = { path = "../asr-server" }
